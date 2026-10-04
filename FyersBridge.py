@@ -224,6 +224,12 @@ class FyersBridge:
         self.ws_lock = threading.Lock()
         self.ws_connected = threading.Event()
 
+        # Exactly one Python thread owns the FYERS DataSocket lifecycle.
+        # FYERS' documented Python pattern keeps the socket alive from the
+        # on_connect callback. This flag prevents a reconnect callback from
+        # recursively calling keep_running() on the same socket instance.
+        self.ws_keep_running_started = False
+
         self.history_queue: queue.Queue[HistoryTask] = queue.Queue()
         self.history_pending: set[tuple[str, str, int, int]] = set()
         self.history_pending_lock = threading.Lock()
@@ -466,7 +472,20 @@ class FyersBridge:
     # FYERS WebSocket
     # ------------------------------------------------------------------
     def websocket_supervisor(self) -> None:
+        """
+        Maintain one FYERS DataSocket instance at a time.
+
+        IMPORTANT:
+        - The official FYERS Python SDK pattern calls keep_running() from
+          the on_connect callback.
+        - reconnect=True lets the SDK handle transient WebSocket failures
+          on the same socket instance.
+        - This outer loop is only for starting a *new* socket after the
+          current socket has genuinely terminated (or after a token refresh).
+        """
         while not self.stop_event.is_set():
+            ws: Optional[data_ws.FyersDataSocket] = None
+
             try:
                 if not self.refresh_clients_from_token_file():
                     time.sleep(TOKEN_POLL_SEC)
@@ -492,33 +511,49 @@ class FyersBridge:
                     setter = getattr(ws, "setQueueProcessInterval", None)
                     if callable(setter):
                         setter(50)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug("Unable to set FYERS queue interval: %s", exc)
 
                 with self.ws_lock:
+                    # There must never be two bridge-owned socket objects.
+                    if self.ws is not None:
+                        raise RuntimeError(
+                            "Internal invariant violated: another FYERS DataSocket is already active."
+                        )
                     self.ws = ws
+                    self.ws_keep_running_started = False
 
-                log.info("Starting official FYERS market-data WebSocket")
+                log.info("Starting official FYERS market-data WebSocket (single-owner session)")
                 self.send_line(
                     "STATUS\tCONNECTING\tOfficial FYERS Python DataSocket starting"
                 )
 
+                # keep_running() is intentionally NOT called here. The official
+                # FYERS Python pattern enters its persistent receive loop from
+                # on_connect(); this prevents the old connect()/keep_running()
+                # ordering from causing rapid socket churn.
                 ws.connect()
-                ws.keep_running()
+
+                log.info(
+                    "FYERS DataSocket session ended; no duplicate socket will be "
+                    "created until this session has fully terminated."
+                )
 
             except Exception as exc:
                 msg = sanitize_message(exc)
-                log.warning("FYERS WebSocket cycle failed: %s", msg)
+                log.warning("FYERS WebSocket session failed: %s", msg)
                 self.send_line(f"STATUS\tDISCONNECTED\t{msg}")
 
                 if self.looks_like_auth_error(msg):
                     self.send_line(f"AUTH_EXPIRED\t{msg}")
 
             finally:
-                self.ws_connected.clear()
-
                 with self.ws_lock:
-                    self.ws = None
+                    if self.ws is ws:
+                        self.ws = None
+                    self.ws_keep_running_started = False
+
+                self.ws_connected.clear()
 
             if not self.stop_event.is_set():
                 time.sleep(FYERS_RETRY_SEC)
@@ -551,6 +586,29 @@ class FyersBridge:
             symbols = sorted(self.symbols)
 
         self.subscribe_symbols(symbols)
+
+        # The official FYERS Python examples enter keep_running() from the
+        # on_connect callback. Do this once per socket instance. If the SDK
+        # invokes on_connect again during an automatic reconnect, resubscribe
+        # but do not recursively enter another keep_running() loop.
+        with self.ws_lock:
+            ws = self.ws
+            should_start_keep_running = (
+                ws is not None and not self.ws_keep_running_started
+            )
+            if should_start_keep_running:
+                self.ws_keep_running_started = True
+
+        if should_start_keep_running and ws is not None:
+            log.info(
+                "Entering FYERS SDK keep_running() for this socket session"
+            )
+            try:
+                ws.keep_running()
+            except Exception as exc:
+                msg = sanitize_message(exc)
+                log.warning("FYERS keep_running() ended with error: %s", msg)
+                self.send_line(f"STATUS\tERROR\tFYERS keep_running: {msg}")
 
     def subscribe_symbols(self, symbols: list[str]) -> None:
         if not symbols:
