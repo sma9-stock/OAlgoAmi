@@ -178,7 +178,6 @@ static volatile LONG g_bFyersWsShouldStop = 0;
 static volatile LONG g_bFyersForceReconnect = 0;
 static HANDLE g_hFyersConnectedEvent = NULL;
 static HANDLE g_hFyersAuthenticatedEvent = NULL;
-static CString g_fyersLastError;
 static LONG g_fyersAckCount = 0;
 static LONG g_fyersUpdateCount = 0;
 
@@ -721,6 +720,7 @@ cleanup:
 static BOOL FyersHttpPostJson(const CString& path,const CStringA& body,
 	const CStringA& authorization,CStringA& response,DWORD& statusCode)
 {
+	CStringA payload = body;
 	response.Empty();statusCode=0;
 	if(authorization.IsEmpty()){FyersSetLastError(_T("FYERS POST: authorization token is empty."));return FALSE;}
 
@@ -748,7 +748,6 @@ static BOOL FyersHttpPostJson(const CString& path,const CStringA& body,
 		{FyersSetWinHttpError(_T("WinHttpAddRequestHeaders(POST)"),GetLastError());goto cleanup;}
 	}
 
-	CStringA payload=body;
 	if(!WinHttpSendRequest(hRequest,WINHTTP_NO_ADDITIONAL_HEADERS,0,(PVOID)payload.GetString(),
 		(DWORD)payload.GetLength(),(DWORD)payload.GetLength(),0))
 	{FyersSetWinHttpError(_T("WinHttpSendRequest(POST)"),GetLastError());goto cleanup;}
@@ -1544,7 +1543,10 @@ static BOOL FyersBuildModeMessage(std::vector<BYTE>& msg)
 
 static HINTERNET FyersConnectWebSocket(void)
 {
-	HINTERNET session=NULL,conn=NULL,request=NULL,ws=NULL;CString hsm;g_fyersLastError.Empty();if(!FyersExtractHsmKeyFromAccessToken(hsm))return NULL;
+	HINTERNET session=NULL,conn=NULL,request=NULL,ws=NULL;
+	CString hsm;
+	std::vector<BYTE> a,m;
+	g_fyersLastError.Empty();if(!FyersExtractHsmKeyFromAccessToken(hsm))return NULL;
 	session=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){FyersSetWinHttpError(_T("WinHttpOpen(WebSocket)"),GetLastError());goto fail;}
 	WinHttpSetTimeouts(session,5000,5000,FYERS_WS_RECEIVE_TIMEOUT_MS,FYERS_WS_RECEIVE_TIMEOUT_MS);
 	conn=WinHttpConnect(session,FYERS_DIRECT_WS_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);if(!conn){FyersSetWinHttpError(_T("WinHttpConnect(socket.fyers.in)"),GetLastError());goto fail;}
@@ -1557,7 +1559,7 @@ static HINTERNET FyersConnectWebSocket(void)
 	ws=WinHttpWebSocketCompleteUpgrade(request,0);if(!ws){FyersSetWinHttpError(_T("WinHttpWebSocketCompleteUpgrade"),GetLastError());goto fail;}WinHttpCloseHandle(request);request=NULL;
 	EnterCriticalSection(&g_fyersWsCS);g_hFyersWebSocket=ws;g_hFyersWsConnection=conn;g_hFyersWsSession=session;LeaveCriticalSection(&g_fyersWsCS);conn=NULL;session=NULL;
 	if(g_hFyersConnectedEvent)SetEvent(g_hFyersConnectedEvent);if(g_hFyersAuthenticatedEvent)ResetEvent(g_hFyersAuthenticatedEvent);
-	std::vector<BYTE> a,m;if(!FyersBuildAuthMessage(a,hsm)||!FyersBuildModeMessage(m)||!FyersSendWebSocketBinary(a)||!FyersSendWebSocketBinary(m)){FyersSetLastError(_T("FYERS WebSocket: failed to send HSM authentication/mode message."));}
+	if(!FyersBuildAuthMessage(a,hsm)||!FyersBuildModeMessage(m)||!FyersSendWebSocketBinary(a)||!FyersSendWebSocketBinary(m)){FyersSetLastError(_T("FYERS WebSocket: failed to send HSM authentication/mode message."));}
 	return ws;
 fail:
 	if(request)WinHttpCloseHandle(request);if(conn)WinHttpCloseHandle(conn);if(session)WinHttpCloseHandle(session);return NULL;
