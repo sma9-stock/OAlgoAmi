@@ -92,7 +92,6 @@ static BOOL g_bridgeStopping = FALSE;
 
 static WSADATA g_bridgeWsaData;
 static BOOL g_bridgeWsaInit = FALSE;
-static CString g_bridgeScriptPath;
 
 static HANDLE g_bridgeTestEvent = NULL;
 static int g_bridgeTestKind = 0;
@@ -888,7 +887,7 @@ static BOOL BridgeLaunchPython()
         return FALSE;
     }
 
-    if (!BridgeFileExists(g_bridgeScriptPath))
+    if (!BridgeFileExists(g_fyersBridgeScriptPath))
     {
         BridgeStatus(_T("FyersBridge.py is missing beside OpenAlgo.dll."));
         return FALSE;
@@ -935,7 +934,7 @@ static BOOL BridgeLaunchPython()
         return out;
     };
 
-    CStringW scriptArg = quoteArg(g_bridgeScriptPath);
+    CStringW scriptArg = quoteArg(g_fyersBridgeScriptPath);
     CStringW appArg = quoteArg(g_fyersAppId);
     CStringW tokenArg = quoteArg(g_fyersTokenFilePath);
     CStringW cmd;
@@ -1155,7 +1154,7 @@ BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
         ? BridgeDefaultTokenPath()
         : BridgeResolvePath(tokenFilePath);
 
-    g_bridgeScriptPath = BridgeDefaultScriptPath();
+    if (g_fyersBridgeScriptPath.IsEmpty()) g_fyersBridgeScriptPath = BridgeDefaultScriptPath();
     g_oServer = g_fyersAppId;
     g_oApiKey = g_fyersTokenFilePath;
     g_fyersAccessToken.Empty();
@@ -1170,7 +1169,7 @@ BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
     file.WriteString(line);
     line.Format(_T("TokenFile=%s\n"), (LPCTSTR)g_fyersTokenFilePath);
     file.WriteString(line);
-    line.Format(_T("BridgeScript=%s\n"), (LPCTSTR)g_bridgeScriptPath);
+    line.Format(_T("BridgeScript=%s\n"), (LPCTSTR)g_fyersBridgeScriptPath);
     file.WriteString(line);
     file.Close();
 
@@ -1314,7 +1313,7 @@ BOOL FyersDirectInit()
 
     // Read branch-local config.
     g_fyersTokenFilePath = BridgeDefaultTokenPath();
-    g_bridgeScriptPath = BridgeDefaultScriptPath();
+    g_fyersBridgeScriptPath = BridgeDefaultScriptPath();
 
     CString cfg = BridgeModuleDir() + _T("\\FyersBridge.config");
     if (BridgeFileExists(cfg))
@@ -1340,7 +1339,7 @@ BOOL FyersDirectInit()
                 else if (key.CompareNoCase(_T("TokenFile")) == 0)
                     g_fyersTokenFilePath = BridgeResolvePath(value);
                 else if (key.CompareNoCase(_T("BridgeScript")) == 0)
-                    g_bridgeScriptPath = BridgeResolvePath(value);
+                    g_fyersBridgeScriptPath = BridgeResolvePath(value);
             }
             file.Close();
         }
