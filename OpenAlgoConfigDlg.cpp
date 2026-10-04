@@ -15,8 +15,8 @@ void COpenAlgoConfigDlg::DoDataExchange(CDataExchange* pDX)
     CDialog::DoDataExchange(pDX);
     DDX_Text(pDX, IDC_SERVER_EDIT, g_oServer);
     DDV_MaxChars(pDX, g_oServer, 255);
-    DDX_Text(pDX, IDC_APIKEY_EDIT, g_oApiKey);
-    DDV_MaxChars(pDX, g_oApiKey, 1023);
+    DDX_Text(pDX, IDC_APIKEY_EDIT, g_fyersTokenFilePath);
+    DDV_MaxChars(pDX, g_fyersTokenFilePath, 1023);
     DDX_Text(pDX, IDC_INTERVAL_EDIT, g_fyersGapCheckIntervalSec);
     DDV_MinMaxInt(pDX, g_fyersGapCheckIntervalSec, 1, 3600);
 }
@@ -46,13 +46,13 @@ BOOL COpenAlgoConfigDlg::OnInitDialog()
 
     SetWindowText(_T("FYERS Direct - 5-Second Data"));
     g_oServer = g_fyersAppId;
-    g_oApiKey = g_fyersAccessToken;
+    g_fyersTokenFilePath = g_fyersTokenFilePath.IsEmpty() ? (BridgeDefaultTokenPath()) : g_fyersTokenFilePath;
 
     CString status;
     status.Format(_T("FYERS App ID: %s"), (LPCTSTR)MaskCredential(g_oServer));
     SetDlgItemText(IDC_STATUS_STATIC, status);
     SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
-                   _T("FYERS v3 SymbolUpdate WebSocket"));
+                   _T("Official FYERS Python DataSocket + local bridge"));
     return TRUE;
 }
 
@@ -63,9 +63,9 @@ void COpenAlgoConfigDlg::OnOK()
         return;
 
     CString appId = g_oServer;
-    CString token = g_oApiKey;
+    CString tokenFile = g_fyersTokenFilePath;
     appId.Trim();
-    token.Trim();
+    tokenFile.Trim();
 
     if (appId.IsEmpty())
     {
@@ -73,13 +73,10 @@ void COpenAlgoConfigDlg::OnOK()
         return;
     }
 
-    if (token.IsEmpty())
-    {
-        AfxMessageBox(_T("Enter the FYERS Access Token."));
-        return;
-    }
+    if (tokenFile.IsEmpty())
+        tokenFile = _T("access_token.txt");
 
-    if (!FyersDirectReconfigure(appId, token))
+    if (!FyersDirectReconfigure(appId, tokenFile))
     {
         AfxMessageBox(_T("Could not save FYERS credentials."));
         return;
@@ -98,11 +95,11 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
         return;
 
     CString appId = g_oServer;
-    CString token = g_oApiKey;
+    CString tokenFile = g_fyersTokenFilePath;
     appId.Trim();
-    token.Trim();
+    tokenFile.Trim();
 
-    if (appId.IsEmpty() || token.IsEmpty())
+    if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
         SetDlgItemText(IDC_STATUS_STATIC,
                        _T("App ID and Access Token are required."));
@@ -111,7 +108,7 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
 
     SetDlgItemText(IDC_STATUS_STATIC, _T("Testing FYERS REST..."));
 
-    if (!FyersDirectReconfigure(appId, token) ||
+    if (!FyersDirectReconfigure(appId, tokenFile) ||
         !FyersTestRestConnection())
     {
         SetDlgItemText(IDC_STATUS_STATIC,
@@ -132,7 +129,7 @@ void COpenAlgoConfigDlg::OnTestWebSocketButton()
     appId.Trim();
     token.Trim();
 
-    if (appId.IsEmpty() || token.IsEmpty())
+    if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
         SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
                        _T("App ID and Access Token are required."));
@@ -142,7 +139,7 @@ void COpenAlgoConfigDlg::OnTestWebSocketButton()
     SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
                    _T("Testing FYERS WebSocket..."));
 
-    if (!FyersDirectReconfigure(appId, token) ||
+    if (!FyersDirectReconfigure(appId, tokenFile) ||
         !FyersTestWebSocket())
     {
         SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
