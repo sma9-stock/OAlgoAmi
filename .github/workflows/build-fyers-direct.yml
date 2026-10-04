@@ -1,8 +1,8 @@
-name: Build FYERS Direct AmiBroker DLL
+name: Build FYERS AmiBroker DLL + Python bridge
 
 on:
   push:
-    branches: [ "fyers-direct-5s", "master" ]
+    branches: [ "fyers-direct-5s", "fyers-python-bridge", "master" ]
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
@@ -45,6 +45,12 @@ jobs:
 
           Write-Host "Built and verified x64 $dll ($size bytes)"
           Write-Host "Required AmiBroker exports verified: $($required -join ', ')"
+      - name: Validate Python bridge syntax
+        shell: powershell
+        run: |
+          python -m py_compile FyersBridge.py
+          Write-Host "FyersBridge.py syntax check passed"
+
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
@@ -52,4 +58,8 @@ jobs:
           path: |
             Release/OpenAlgo.dll
             Release/OpenAlgo.pdb
+            FyersBridge.py
+            requirements-fyers-bridge.txt
+            FyersBridge.config.example
+            docs/FYERS_PYTHON_BRIDGE.md
           if-no-files-found: error
