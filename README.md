@@ -1,120 +1,149 @@
-# OpenAlgo AmiBroker Data Plugin
+# FYERS Python Bridge 5-Second AmiBroker Data Plugin
 
-OpenAlgo AmiBroker Data Plugin connects AmiBroker to a running OpenAlgo server.
-It provides historical market data through the OpenAlgo REST history API and
-realtime chart/quote updates through OpenAlgo WebSocket streams.
+This branch keeps the AmiBroker data plug-in native while moving all FYERS communication to the official FYERS Python API v3 SDK.
 
-## Current Status
+## Architecture
 
-Working:
+```
+AmiBroker
+   |
+OpenAlgo.dll
+   |
+127.0.0.1:47321
+   |
+FyersBridge.py
+   |   | +-- official FYERS DataSocket
+   | +-- REST /data/history
+   |
+FYERS
+```
 
-- Historical 1-minute and daily charts through `/api/v1/history`
-- Manual historical backfill from AmiBroker plugin status menu
-- Automatic intraday history refresh using configurable backfill cadence
-- Realtime chart candles from WebSocket LTP/trade ticks
-- Realtime Quote Window from WebSocket quote/depth frames
-- WebSocket reconnect, ping/pong, and resubscription
-- Active chart refresh after matching backfill completes
+The DLL does not make any FYERS HTTP or WebSocket calls.
 
-Known issue:
+There is **no CSV in the live path** and no OpenAlgo server is required.
 
-- Time & Sales is not working reliably in this version. It is documented as a
-  known limitation and will be fixed in a later version.
+## Authentication
 
-## Documentation
+The existing user workflow is intentionally preserved:
 
-See the rewritten documentation in [docs/README.md](docs/README.md).
+1. Run the existing `atok.py`.
+2. Complete the normal FYERS browser login.
+3. Paste the redirected localhost URL into `atok.py` as you already do.
+4. `atok.py` writes `access_token.txt`.
+5. The bridge reads that file.
 
-Main docs:
+The bridge never launches a browser and never performs the authorization-code exchange.
 
-- [User Guide](docs/USER_GUIDE.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Technical Documentation](docs/TECHNICAL_DOCUMENTATION.md)
-- [Build Guide](docs/BUILD_GUIDE.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Known Limitations](docs/KNOWN_LIMITATIONS.md)
-- [Release Notes](docs/RELEASE_NOTES.md)
+A temporary WebSocket/network disconnect does **not** regenerate the access token.
 
-OpenAlgo API reference material remains under [docs/api](docs/api/README.md).
+When `access_token.txt` changes, the DLL watchdog restarts the bridge so the new daily token is used.
+
+Do not commit `access_token.txt`, the FYERS secret, or any other credential.
+
+## Live market data
+
+The bridge uses the official FYERS Python `FyersDataSocket` with `SymbolUpdate` and reconnect enabled.
+
+Current FYERS message types include:
+- `if` for index updates
+- `sf` for equity/option updates
+- `dp` for depth
+
+The bridge explicitly handles index and tradable symbols differently for timestamps and volume.
+
+Tradable equity/F&O volume is derived from FYERS cumulative traded-volume updates and last-traded quantity. Index data does not invent traded volume.
+
+## 5-second engine
+
+Live updates are bucketed by exchange timestamp into five-second intervals.
+
+Each symbol maintains:
+- current forming 5-second OHLCV/OI
+- completed 5-second bars
+- last completed timestamp
+- cumulative-volume baseline
+
+The DLL receives current-bar updates without writing them to disk.
+
+At a new five-second bucket, the previous bar is marked complete.
+
+## Gap repair
+
+When the live exchange timestamp jumps over one or more five-second buckets, the bridge automatically queues a REST `5S` history request for the missing interval.
+
+On local bridge restart, the DLL gives the bridge the last completed five-second timestamp so only the missing range needs to be requested.
+
+The automatic gap-fill safety cap is 3600 seconds. A larger outage is reported instead of fabricating bars.
+
+## Historical data
+
+For a new symbol, the bridge requests:
+- recent `5S` history
+- approximately two years of `D` history
+
+FYERS currently documents:
+- seconds history: latest 30 trading days
+- minute history: maximum 100 days/request
+- day/week/month history: maximum 366 days/request
+
+The bridge requests a slightly wider 42-calendar-day seconds window and retains whatever FYERS actually returns.
+
+Daily history is chunked automatically.
+
+## AmiBroker side
+
+The DLL:
+- implements the AmiBroker plugin exports
+- stores bars in memory
+- serves `GetQuotesEx`
+- maintains `RecentInfo`
+- posts AmiBroker streaming-update notifications
+- starts and watches `FyersBridge.py`
+- reconnects to the local bridge after a bridge/network failure
+
+AmiBroker is never blocked waiting for a FYERS HTTP request.
+
+## Performance goal
+
+The old workflow used:
+
+`FYERS -> Python -> CSV -> OLE import -> AmiBroker`
+
+This branch removes the live CSV/OLE loop:
+
+`FYERS WebSocket -> Python memory -> localhost IPC -> DLL memory -> AmiBroker`
+
+Historical data uses REST only in the Python bridge and is streamed to the DLL over local IPC.
+
+## Python setup
+
+Install the official FYERS v3 Python package:
+
+```
+pip install -r requirements-fyers-bridge.txt
+```
+
+The bridge can also be run manually for diagnostics:
+
+```
+py -3 FyersBridge.py --app-id YOUR_FYERS_APP_ID-100 --token-file access_token.txt
+```
+
+When launched by the DLL, these arguments are supplied automatically.
 
 ## Configuration
 
-Configure the plugin from AmiBroker:
+The plug-in configuration dialog uses:
+- **App ID**: exact FYERS App ID as issued
+- **Token file**: normally `access_token.txt`
+- **Gap check**: monitoring interval
 
-```text
-File -> Database Settings -> Configure
-```
+The local configuration file contains no access token:
 
-Fields:
+`FyersBridge.config`
 
-| Field | Purpose | Default |
-| --- | --- | --- |
-| Server | OpenAlgo HTTP host | `127.0.0.1` |
-| Port | OpenAlgo HTTP port | `5000` |
-| API Key | OpenAlgo app API key | Required |
-| Backfill Refresh (sec) | Automatic 1-minute history refresh cadence | `30` |
-| Time Shift (hours) | AmiBroker time adjustment | `0` |
-| WebSocket URL | OpenAlgo WebSocket endpoint | `ws://127.0.0.1:8765` |
+## Analysis-only boundary
 
-The old user-facing Refresh Interval field has been repurposed. It now controls
-intraday backfill refresh. Connection/status heartbeat is fixed internally at
-30 seconds.
+This branch is deliberately market-data-only.
 
-## Data Sources
-
-Historical data:
-
-```text
-POST /api/v1/history
-```
-
-Streaming data:
-
-```text
-WebSocket mode 1: LTP/trade ticks
-WebSocket mode 2: Quote fields
-WebSocket mode 3: Depth/top-of-book
-```
-
-Streaming windows intentionally do not use `/api/v1/quotes` as a fallback.
-
-## Symbol Format
-
-Use:
-
-```text
-SYMBOL-EXCHANGE
-```
-
-Examples:
-
-```text
-RELIANCE-NSE
-INFY-NSE
-CRUDEOIL18JUN26FUT-MCX
-NIFTY28MAY26FUT-NFO
-```
-
-## Build
-
-From the project directory:
-
-```powershell
-& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe' OpenAlgoPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m
-```
-
-Output:
-
-```text
-Release\OpenAlgo.dll
-```
-
-See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for detailed build and install
-steps.
-
-## Disclaimer
-
-This plugin is for education, research, and analysis. Market data comes from the
-connected OpenAlgo broker feed. The maintainers do not guarantee accuracy,
-completeness, timeliness, or suitability for trading decisions. Verify data from
-official broker/exchange sources before using it.
+It does not import or call the FYERS order socket and does not implement place, modify, cancel, GTT, position-management, or other order execution functions.

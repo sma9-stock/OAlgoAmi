@@ -132,3 +132,8 @@ api_keys.txt
 # Documentation build output
 [Dd]oc/_build/
 [Dd]ocs/_build/
+# FYERS Python bridge runtime secrets/state
+access_token.txt
+FyersBridge.config
+fyers_bridge.log
+fyers_bridge.log.*

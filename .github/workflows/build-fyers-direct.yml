@@ -1,0 +1,66 @@
+name: Build FYERS AmiBroker DLL + Python bridge
+
+on:
+  push:
+    branches: [ "fyers-direct-5s", "fyers-python-bridge", "fix/fyers-ws-single-owner", "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build Release x64
+        run: msbuild OpenAlgoPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+      - name: Verify DLL
+        shell: powershell
+        run: |
+          $dll = "Release\\OpenAlgo.dll"
+          if (!(Test-Path $dll)) { throw "Build did not produce $dll" }
+          $size = (Get-Item $dll).Length
+          if ($size -lt 10000) { throw "DLL is unexpectedly small: $size bytes" }
+
+          $dumpbin = Join-Path $env:ProgramFiles "Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe"
+          if (!(Test-Path $dumpbin)) {
+            $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
+          }
+
+          $headers = & $dumpbin /headers $dll 2>&1
+          if (-not ($headers -match "8664 machine \(x64\)" -or $headers -match "PE32\+")) {
+            throw "DLL did not verify as x64."
+          }
+
+          $exports = & $dumpbin /exports $dll 2>&1
+          $required = @("GetPluginInfo","Init","Release","Configure","GetQuotes","GetQuotesEx","SetTimeBase","Notify","GetRecentInfo","GetSymbolLimit","GetStatus","GetExtraData")
+          foreach ($name in $required) {
+            if (-not ($exports -match ("\b" + [regex]::Escape($name) + "\b"))) {
+              throw "Required AmiBroker export missing: $name"
+            }
+          }
+
+          Write-Host "Built and verified x64 $dll ($size bytes)"
+          Write-Host "Required AmiBroker exports verified: $($required -join ', ')"
+      - name: Validate Python bridge syntax
+        shell: powershell
+        run: |
+          python -m py_compile FyersBridge.py FyersSmokeTest.py
+          Write-Host "FyersBridge.py syntax check passed"
+
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenAlgo-FYERS-Direct-x64
+          path: |
+            Release/OpenAlgo.dll
+            Release/OpenAlgo.pdb
+            FyersBridge.py
+            FyersSmokeTest.py
+            requirements-fyers-bridge.txt
+            FyersBridge.config.example
+            docs/FYERS_PYTHON_BRIDGE.md
+          if-no-files-found: error

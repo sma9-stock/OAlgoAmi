@@ -11,9 +11,9 @@
 #include <stdlib.h>  // For qsort
 
 // Plugin identification
-#define PLUGIN_NAME "OpenAlgo Data Plugin"
-#define VENDOR_NAME "OpenAlgo Community"
-#define PLUGIN_VERSION 10003
+#define PLUGIN_NAME "FYERS Direct 5-Second Data Plugin"
+#define VENDOR_NAME "OpenAlgo AmiBroker Community"
+#define PLUGIN_VERSION 10200
 #define PLUGIN_ID PIDCODE('T', 'E', 'S', 'T')  // Unique 4-char code
 #define THIS_PLUGIN_TYPE PLUGIN_TYPE_DATA
 #define AGENT_NAME PLUGIN_NAME
@@ -52,6 +52,21 @@ CString g_oServer = _T("127.0.0.1");
 CString g_oApiKey = _T("");  // API Key for authentication
 CString g_oWebSocketUrl = _T("ws://127.0.0.1:8765");  // WebSocket URL
 int g_nStatus = STATUS_WAIT;
+
+////////////////////////////////////////////////////////////
+// FYERS direct configuration
+//
+// App ID is preserved exactly as issued by FYERS (for example -100 or -200).
+// The access token is intentionally owned by access_token.txt and the Python bridge.
+// The DLL does not embed or send the secret token to FYERS.
+////////////////////////////////////////////////////////////
+BOOL g_bDirectFyersMode = TRUE;
+CString g_fyersAppId = _T("");
+CString g_fyersAccessToken = _T("");  // intentionally unused in Python-bridge build
+CString g_fyersTokenFilePath = _T("");
+CString g_fyersBridgeScriptPath = _T("");
+CString g_fyersLastError = _T("");
+int g_fyersGapCheckIntervalSec = 5;
 
 // Backfill request tracking
 int g_nBackfillDays = 0;        // Number of days to backfill (0 = use default logic)
@@ -279,8 +294,12 @@ int CompareQuotations(const void* a, const void* b);
 //////////////////////////////////////////////////////////
 
 #include "OpenAlgoUtilities.inc"
+#ifdef FYERS_PY_BRIDGE_BUILD
+#include "FyersPythonBridge.inc"
+#else
 #include "OpenAlgoHistory.inc"
 #include "OpenAlgoAmiBroker.inc"
 #include "OpenAlgoWebSocket.inc"
 #include "OpenAlgoRealtimeBars.inc"
 #include "OpenAlgoWorkers.inc"
+#endif
