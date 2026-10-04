@@ -662,7 +662,7 @@ static BOOL FyersHttpGet(const CString& pathAndQuery, CStringA& response, DWORD&
 	          tokenW(FyersNormalizeAccessToken(g_fyersAccessToken)), auth;
 	auth.Format(L"Authorization: %s:%s\r\n",(LPCWSTR)appIdW,(LPCWSTR)tokenW);
 
-	hSession=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin/1.0",
+	hSession=WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
 		WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,
 		WINHTTP_NO_PROXY_BYPASS,0);
 	if(!hSession){FyersSetWinHttpError(_T("WinHttpOpen"),GetLastError());goto cleanup;}
