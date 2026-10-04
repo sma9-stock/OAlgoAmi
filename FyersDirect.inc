@@ -730,7 +730,7 @@ static BOOL FyersHttpPostJson(const CString& path,const CStringA& body,
 	CStringW authSrcW(authSrc);
 	authW.Format(L"Authorization: %s\r\n", (LPCWSTR)authSrcW);
 
-	hSession=WinHttpOpen(L"FYERS Direct AmiBroker Plugin/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+	hSession=WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
 		WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
 	if(!hSession){FyersSetWinHttpError(_T("WinHttpOpen(POST)"),GetLastError());goto cleanup;}
 	WinHttpSetTimeouts(hSession,5000,5000,10000,10000);
@@ -1547,7 +1547,7 @@ static HINTERNET FyersConnectWebSocket(void)
 	CString hsm;
 	std::vector<BYTE> a,m;
 	g_fyersLastError.Empty();if(!FyersExtractHsmKeyFromAccessToken(hsm))return NULL;
-	session=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){FyersSetWinHttpError(_T("WinHttpOpen(WebSocket)"),GetLastError());goto fail;}
+	session=WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){FyersSetWinHttpError(_T("WinHttpOpen(WebSocket)"),GetLastError());goto fail;}
 	WinHttpSetTimeouts(session,5000,5000,FYERS_WS_RECEIVE_TIMEOUT_MS,FYERS_WS_RECEIVE_TIMEOUT_MS);
 	conn=WinHttpConnect(session,FYERS_DIRECT_WS_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);if(!conn){FyersSetWinHttpError(_T("WinHttpConnect(socket.fyers.in)"),GetLastError());goto fail;}
 	request=WinHttpOpenRequest(conn,L"GET",FYERS_DIRECT_WS_PATH_W,NULL,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(!request){FyersSetWinHttpError(_T("WinHttpOpenRequest(WebSocket)"),GetLastError());goto fail;}
