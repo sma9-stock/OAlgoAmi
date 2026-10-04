@@ -28,6 +28,14 @@ A temporary WebSocket disconnect does not invoke the browser login flow.
 
 The official FYERS Python data socket is used with `SymbolUpdate`.
 
+The bridge maintains exactly one `FyersDataSocket` instance per connection session. The
+official FYERS Python lifecycle is followed: the persistent `keep_running()` loop is
+entered from the connection callback, while `reconnect=True` is left to the SDK for
+transient network reconnects. The outer bridge supervisor creates a replacement socket
+only after the previous socket session has genuinely terminated (for example after a
+token refresh or after the SDK exhausts its reconnect attempts). A reconnect callback
+resubscribes the saved symbols but never starts a second `keep_running()` loop.
+
 Current FYERS documentation distinguishes:
 - `if`: index update
 - `sf`: equity/option update
