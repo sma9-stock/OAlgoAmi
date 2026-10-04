@@ -107,246 +107,54 @@ void COpenAlgoConfigDlg::OnApiKeyEditSetFocus()
 void COpenAlgoConfigDlg::OnOK()
 {
 	AFX_MANAGE_STATE(AfxGetStaticModuleState());
+	if (!UpdateData(TRUE)) return;
 
-	if (!UpdateData(TRUE))
-		return;
+	CString appId = g_oServer; appId.Trim();
+	CString token = g_oApiKey; token.Trim();
 
-	if (g_oServer.IsEmpty())
+	if (appId.IsEmpty())
 	{
-		AfxMessageBox(_T("Please enter a server address."), MB_OK | MB_ICONWARNING);
+		AfxMessageBox(_T("Please enter the FYERS App ID."), MB_OK | MB_ICONWARNING);
 		GetDlgItem(IDC_SERVER_EDIT)->SetFocus();
 		return;
 	}
-
-	if (g_oApiKey.IsEmpty())
+	if (token.IsEmpty())
 	{
-		AfxMessageBox(_T("Please enter your OpenAlgo API Key."), MB_OK | MB_ICONWARNING);
+		AfxMessageBox(_T("Please enter the FYERS Access Token."), MB_OK | MB_ICONWARNING);
 		GetDlgItem(IDC_APIKEY_EDIT)->SetFocus();
 		return;
 	}
 
-	// Defensive: ensure m_pszRegistryKey is set. CWinApp::InitInstance is not
-	// reliably called for Regular MFC DLLs, so SetRegistryKey from our
-	// COpenAlgoApp::InitInstance may never run. Calling it here is idempotent
-	// and guarantees WriteProfileString hits the registry instead of falling
-	// back to WIN.INI (where the write would silently fail).
-	theApp.EnsureRegistryRoot();
-	CWinApp* pApp = AfxGetApp();
-
-	BOOL bSrv  = pApp ? pApp->WriteProfileString(_T("OpenAlgo"), _T("Server"),        g_oServer)        : FALSE;
-	// API key is persisted independent of MFC's profile system. The primary
-	// store is now a file under %LOCALAPPDATA%\OpenAlgoPlugin\settings.dat,
-	// because something on this machine has been wiping the registry subkey
-	// between sessions. WriteApiKeyDirect writes both the file and the
-	// registry; either landing is enough for a successful save.
-	BOOL bKey  = WriteApiKeyDirect(g_oApiKey);
-	BOOL bWs   = pApp ? pApp->WriteProfileString(_T("OpenAlgo"), _T("WebSocketUrl"),  g_oWebSocketUrl)  : FALSE;
-	BOOL bPort = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("Port"),          g_nPortNumber)    : FALSE;
-	g_nRefreshInterval = 30; // Connection/status heartbeat is fixed internally.
-	g_nBackfillIntervalMs = g_nBackfillRefreshIntervalSec * 1000;
-	BOOL bIv   = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("RefreshInterval"), g_nRefreshInterval) : FALSE;
-	BOOL bBri  = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("BackfillRefreshIntervalSec"), g_nBackfillRefreshIntervalSec) : FALSE;
-	BOOL bTs   = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("TimeShift"),     g_nTimeShift)     : FALSE;
-	BOOL bRt   = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("EnableRealTimeCandles"), g_bRealTimeCandlesEnabled ? 1 : 0) : FALSE;
-	BOOL bBf   = pApp ? pApp->WriteProfileInt   (_T("OpenAlgo"), _T("BackfillIntervalMs"),    g_nBackfillIntervalMs)            : FALSE;
-
-	// Read it straight back to verify the value actually persisted. If a
-	// security policy or AV blocks the write we want to know immediately
-	// rather than silently losing the key again.
-	CString verifyKey;
-	BOOL bVerify = ReadApiKeyDirect(verifyKey) && (verifyKey == g_oApiKey);
-
-	CString log;
-	log.Format(
-		_T("OpenAlgo: OnOK saved ApiKey=%s Server=%s "
-		   "(srv=%d key=%d ws=%d port=%d heartbeat=%d backfill=%d ts=%d rt=%d bf=%d verify=%d)"),
-		(LPCTSTR)MaskKey(g_oApiKey), (LPCTSTR)g_oServer,
-		bSrv, bKey, bWs, bPort, bIv, bBri, bTs, bRt, bBf, bVerify);
-	OutputDebugString(log);
-
-	if (!bKey || !bVerify)
+	if (!FyersDirectReconfigure(appId, token))
 	{
-		AfxMessageBox(
-			_T("Failed to persist the OpenAlgo API key to the registry.\n")
-			_T("Check that AmiBroker has write access to ")
-			_T("HKCU\\Software\\OpenAlgo and that no security policy ")
-			_T("is blocking that location."),
-			MB_OK | MB_ICONERROR);
+		AfxMessageBox(_T("Could not save FYERS credentials. The Access Token is protected with Windows DPAPI."), MB_OK | MB_ICONERROR);
 		return;
 	}
 
+	g_oServer = appId;
+	g_oApiKey = token;
+	g_nStatus = STATUS_WAIT;
+	if (g_hAmiBrokerWnd)
+		PostMessage(g_hAmiBrokerWnd, WM_USER_STREAMING_UPDATE, 0, 0);
 	CDialog::OnOK();
 }
 
 void COpenAlgoConfigDlg::OnTestConnectionButton()
 {
-	// Update data from controls
-	if (!UpdateData(TRUE))
-	{
-		return;
-	}
+	if (!UpdateData(TRUE)) return;
+	SetDlgItemText(IDC_STATUS_STATIC, _T("Testing FYERS REST connection..."));
+	BOOL ok = FyersDirectReconfigure(g_oServer, g_oApiKey) && FyersTestRestConnection();
+	SetDlgItemText(IDC_STATUS_STATIC, ok ? _T("FYERS REST connection successful.")
+	                                    : _T("FYERS REST connection failed. Check App ID, Access Token and network."));
+}
 
-	// Validate API Key
-	if (g_oApiKey.IsEmpty())
-	{
-		AfxMessageBox(_T("Please enter your OpenAlgo API Key before testing the connection."), MB_OK | MB_ICONWARNING);
-		GetDlgItem(IDC_APIKEY_EDIT)->SetFocus();
-		return;
-	}
-
-	SetDlgItemText(IDC_STATUS_STATIC, _T("Testing connection..."));
-
-	// Change cursor to wait cursor
-	CWaitCursor wait;
-
-	// Test connection to OpenAlgo server using ping endpoint
-	BOOL bConnected = FALSE;
-	CString oURL = BuildOpenAlgoURL(g_oServer, g_nPortNumber, _T("/api/v1/ping"));
-
-	try
-	{
-		CInternetSession oSession(_T("OpenAlgo Plugin Test"), 1,
-			INTERNET_OPEN_TYPE_DIRECT, NULL, NULL, INTERNET_FLAG_DONT_CACHE);
-		oSession.SetOption(INTERNET_OPTION_CONNECT_TIMEOUT, 5000);
-		oSession.SetOption(INTERNET_OPTION_RECEIVE_TIMEOUT, 5000);
-
-		// Prepare POST data with API key
-		CString oPostData;
-		oPostData.Format(_T("{\"apikey\":\"%s\"}"), (LPCTSTR)g_oApiKey);
-
-		CHttpConnection* pConnection = NULL;
-		CHttpFile* pFile = NULL;
-
-		// Parse server and port
-		INTERNET_PORT nPort = (INTERNET_PORT)g_nPortNumber;
-		CString oServer = g_oServer;
-
-		// Remove http:// or https:// if present
-		oServer.Replace(_T("http://"), _T(""));
-		oServer.Replace(_T("https://"), _T(""));
-
-		pConnection = oSession.GetHttpConnection(oServer, nPort);
-
-		if (pConnection)
-		{
-			// Create POST request
-			pFile = pConnection->OpenRequest(
-				CHttpConnection::HTTP_VERB_POST,
-				_T("/api/v1/ping"),
-				NULL,
-				1,
-				NULL,
-				NULL,
-				INTERNET_FLAG_RELOAD | INTERNET_FLAG_DONT_CACHE);
-
-			if (pFile)
-			{
-				// Set headers
-				CString oHeaders = _T("Content-Type: application/json\r\n");
-
-				// Convert string to UTF-8 for sending
-				CStringA oPostDataA(oPostData);
-
-				// Send the request
-				BOOL bResult = pFile->SendRequest(oHeaders, (LPVOID)(LPCSTR)oPostDataA, oPostDataA.GetLength());
-
-				if (bResult)
-				{
-					DWORD dwStatusCode = 0;
-					pFile->QueryInfoStatusCode(dwStatusCode);
-
-					if (dwStatusCode == 200)
-					{
-						// Try to read response
-						CString oResponse;
-						CString oLine;
-						while (pFile->ReadString(oLine))
-						{
-							oResponse += oLine;
-							if (oResponse.GetLength() > 1000) break; // Limit response size
-						}
-
-						// Check if response contains "success" and "pong" (simple JSON parsing)
-						if ((oResponse.Find(_T("\"status\":\"success\"")) >= 0 ||
-							 oResponse.Find(_T("\"status\": \"success\"")) >= 0) &&
-							(oResponse.Find(_T("\"message\":\"pong\"")) >= 0 ||
-							 oResponse.Find(_T("\"message\": \"pong\"")) >= 0))
-						{
-							bConnected = TRUE;
-
-							// Try to extract broker from response
-							int iBrokerPos = oResponse.Find(_T("\"broker\":"));
-							if (iBrokerPos >= 0)
-							{
-								iBrokerPos += 10; // Move past "broker":"
-								int iEndPos = oResponse.Find(_T("\""), iBrokerPos);
-								if (iEndPos > iBrokerPos)
-								{
-									CString oBroker = oResponse.Mid(iBrokerPos, iEndPos - iBrokerPos);
-									CString oStatus;
-									oStatus.Format(_T("Connection successful! Broker: %s"), (LPCTSTR)oBroker);
-									SetDlgItemText(IDC_STATUS_STATIC, oStatus);
-								}
-								else
-								{
-									SetDlgItemText(IDC_STATUS_STATIC,
-										_T("Connection successful! OpenAlgo server is running."));
-								}
-							}
-							else
-							{
-								SetDlgItemText(IDC_STATUS_STATIC,
-									_T("Connection successful! OpenAlgo server is running."));
-							}
-						}
-						else if (oResponse.Find(_T("\"status\":\"error\"")) >= 0)
-						{
-							SetDlgItemText(IDC_STATUS_STATIC,
-								_T("Connection failed: Invalid API Key or server error."));
-						}
-						else
-						{
-							SetDlgItemText(IDC_STATUS_STATIC,
-								_T("Connection failed: Unexpected response from server."));
-						}
-					}
-					else
-					{
-						CString oStatus;
-						oStatus.Format(_T("Server returned HTTP status code: %lu"), dwStatusCode);
-						SetDlgItemText(IDC_STATUS_STATIC, oStatus);
-					}
-				}
-				else
-				{
-					SetDlgItemText(IDC_STATUS_STATIC, _T("Failed to send request to server."));
-				}
-
-				pFile->Close();
-				delete pFile;
-			}
-
-			pConnection->Close();
-			delete pConnection;
-		}
-		else
-		{
-			SetDlgItemText(IDC_STATUS_STATIC, _T("Failed to connect to server."));
-		}
-
-		oSession.Close();
-	}
-	catch (CInternetException* e)
-	{
-		TCHAR szError[256];
-		e->GetErrorMessage(szError, 256);
-
-		CString oStatus;
-		oStatus.Format(_T("Connection failed: %s"), szError);
-		SetDlgItemText(IDC_STATUS_STATIC, oStatus);
-
-		e->Delete();
-	}
+void COpenAlgoConfigDlg::OnTestWebSocketButton()
+{
+	if (!UpdateData(TRUE)) return;
+	SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC, _T("Testing FYERS WebSocket..."));
+	BOOL ok = FyersDirectReconfigure(g_oServer, g_oApiKey) && FyersTestWebSocket();
+	SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC, ok ? _T("FYERS WebSocket connected.")
+	                                               : _T("FYERS WebSocket connection failed."));
 }
 
 

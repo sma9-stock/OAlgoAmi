@@ -11,8 +11,8 @@
 #include <stdlib.h>  // For qsort
 
 // Plugin identification
-#define PLUGIN_NAME "OpenAlgo Data Plugin"
-#define VENDOR_NAME "OpenAlgo Community"
+#define PLUGIN_NAME "FYERS Direct 5-Second Data Plugin"
+#define VENDOR_NAME "OpenAlgo AmiBroker Community"
 #define PLUGIN_VERSION 10003
 #define PLUGIN_ID PIDCODE('T', 'E', 'S', 'T')  // Unique 4-char code
 #define THIS_PLUGIN_TYPE PLUGIN_TYPE_DATA
@@ -52,6 +52,18 @@ CString g_oServer = _T("127.0.0.1");
 CString g_oApiKey = _T("");  // API Key for authentication
 CString g_oWebSocketUrl = _T("ws://127.0.0.1:8765");  // WebSocket URL
 int g_nStatus = STATUS_WAIT;
+
+////////////////////////////////////////////////////////////
+// FYERS direct configuration
+//
+// App ID is normalized to the <APP_ID>-100 form internally.
+// The Access Token is held only in memory at runtime and stored encrypted
+// with Windows DPAPI by FyersDirect.inc. No token is present in source.
+////////////////////////////////////////////////////////////
+BOOL g_bDirectFyersMode = TRUE;
+CString g_fyersAppId = _T("");
+CString g_fyersAccessToken = _T("");
+int g_fyersGapCheckIntervalSec = 5;
 
 // Backfill request tracking
 int g_nBackfillDays = 0;        // Number of days to backfill (0 = use default logic)
@@ -279,6 +291,7 @@ int CompareQuotations(const void* a, const void* b);
 //////////////////////////////////////////////////////////
 
 #include "OpenAlgoUtilities.inc"
+#include "FyersDirect.inc"
 #include "OpenAlgoHistory.inc"
 #include "OpenAlgoAmiBroker.inc"
 #include "OpenAlgoWebSocket.inc"

@@ -1,0 +1,35 @@
+name: Build FYERS Direct AmiBroker DLL
+
+on:
+  push:
+    branches: [ "fyers-direct-5s", "master" ]
+  pull_request:
+    branches: [ "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+      - name: Build Release x64
+        run: msbuild OpenAlgoPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+      - name: Verify DLL
+        shell: powershell
+        run: |
+          $dll = "Release\\OpenAlgo.dll"
+          if (!(Test-Path $dll)) { throw "Build did not produce $dll" }
+          $size = (Get-Item $dll).Length
+          if ($size -lt 10000) { throw "DLL is unexpectedly small: $size bytes" }
+          Write-Host "Built $dll ($size bytes)"
+      - name: Upload DLL
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenAlgo-FYERS-Direct-x64
+          path: |
+            Release/OpenAlgo.dll
+            Release/OpenAlgo.pdb
+          if-no-files-found: error

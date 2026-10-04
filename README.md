@@ -1,120 +1,25 @@
-# OpenAlgo AmiBroker Data Plugin
+# FYERS Direct 5-Second AmiBroker Data Plugin
 
-OpenAlgo AmiBroker Data Plugin connects AmiBroker to a running OpenAlgo server.
-It provides historical market data through the OpenAlgo REST history API and
-realtime chart/quote updates through OpenAlgo WebSocket streams.
+This fork changes the data path from OpenAlgo to a native FYERS REST + WebSocket transport.
 
-## Current Status
+## Target data model
+- Base chart data: 5-second
+- Initial daily history: 2 years
+- Initial 5-second history: provider-available recent window
+- Live feed: FYERS SymbolUpdate WebSocket
+- Gap repair: REST 5-second candles after reconnects / detected time gaps
+- No order placement or trading API is used
 
-Working:
+## Credentials
+Configure the plugin with FYERS App ID and FYERS Access Token. The token is stored using Windows DPAPI under the current Windows user profile and is never embedded in source.
 
-- Historical 1-minute and daily charts through `/api/v1/history`
-- Manual historical backfill from AmiBroker plugin status menu
-- Automatic intraday history refresh using configurable backfill cadence
-- Realtime chart candles from WebSocket LTP/trade ticks
-- Realtime Quote Window from WebSocket quote/depth frames
-- WebSocket reconnect, ping/pong, and resubscription
-- Active chart refresh after matching backfill completes
+The existing access_token.txt file is accepted only as migration convenience; native configuration is preferred.
 
-Known issue:
-
-- Time & Sales is not working reliably in this version. It is documented as a
-  known limitation and will be fixed in a later version.
-
-## Documentation
-
-See the rewritten documentation in [docs/README.md](docs/README.md).
-
-Main docs:
-
-- [User Guide](docs/USER_GUIDE.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Technical Documentation](docs/TECHNICAL_DOCUMENTATION.md)
-- [Build Guide](docs/BUILD_GUIDE.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-- [Known Limitations](docs/KNOWN_LIMITATIONS.md)
-- [Release Notes](docs/RELEASE_NOTES.md)
-
-OpenAlgo API reference material remains under [docs/api](docs/api/README.md).
-
-## Configuration
-
-Configure the plugin from AmiBroker:
-
-```text
-File -> Database Settings -> Configure
-```
-
-Fields:
-
-| Field | Purpose | Default |
-| --- | --- | --- |
-| Server | OpenAlgo HTTP host | `127.0.0.1` |
-| Port | OpenAlgo HTTP port | `5000` |
-| API Key | OpenAlgo app API key | Required |
-| Backfill Refresh (sec) | Automatic 1-minute history refresh cadence | `30` |
-| Time Shift (hours) | AmiBroker time adjustment | `0` |
-| WebSocket URL | OpenAlgo WebSocket endpoint | `ws://127.0.0.1:8765` |
-
-The old user-facing Refresh Interval field has been repurposed. It now controls
-intraday backfill refresh. Connection/status heartbeat is fixed internally at
-30 seconds.
-
-## Data Sources
-
-Historical data:
-
-```text
-POST /api/v1/history
-```
-
-Streaming data:
-
-```text
-WebSocket mode 1: LTP/trade ticks
-WebSocket mode 2: Quote fields
-WebSocket mode 3: Depth/top-of-book
-```
-
-Streaming windows intentionally do not use `/api/v1/quotes` as a fallback.
-
-## Symbol Format
-
-Use:
-
-```text
-SYMBOL-EXCHANGE
-```
-
-Examples:
-
-```text
-RELIANCE-NSE
-INFY-NSE
-CRUDEOIL18JUN26FUT-MCX
-NIFTY28MAY26FUT-NFO
-```
+## AmiBroker database
+Use a 5-second base interval. AmiBroker can compress 5-second data into higher intervals. Do not use Tick base interval for this build: the plugin supplies 5-second bars, not raw tick storage.
 
 ## Build
+Visual Studio 2022, Desktop development with C++, MFC, and Windows SDK. GitHub Actions builds Release|x64 and publishes the DLL artifact.
 
-From the project directory:
-
-```powershell
-& 'C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\amd64\MSBuild.exe' OpenAlgoPlugin.vcxproj /p:Configuration=Release /p:Platform=x64 /m
-```
-
-Output:
-
-```text
-Release\OpenAlgo.dll
-```
-
-See [docs/BUILD_GUIDE.md](docs/BUILD_GUIDE.md) for detailed build and install
-steps.
-
-## Disclaimer
-
-This plugin is for education, research, and analysis. Market data comes from the
-connected OpenAlgo broker feed. The maintainers do not guarantee accuracy,
-completeness, timeliness, or suitability for trading decisions. Verify data from
-official broker/exchange sources before using it.
+## Limitation
+FYERS cannot provide historical 5-second candles that its API does not expose. The plugin repairs gaps only when FYERS REST can return the requested 5-second data.

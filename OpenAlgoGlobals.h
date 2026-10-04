@@ -3,9 +3,9 @@
 #define OPENALGO_GLOBALS_H
 
 #include "stdafx.h"
-#include "resource.h"  // Include resource definitions
+#include "resource.h"
 
-// Status enum - MUST be defined before any usage
+// Status enum
 enum OpenAlgoStatus
 {
 	STATUS_WAIT = 0,
@@ -14,43 +14,55 @@ enum OpenAlgoStatus
 	STATUS_SHUTDOWN = 3
 };
 
-// Global variables - declare as extern here
+// Legacy OpenAlgo settings remain declared for source compatibility. The
+// FYERS-direct build does not start the legacy OpenAlgo transport.
 extern HWND g_hAmiBrokerWnd;
 extern int g_nPortNumber;
 extern int g_nRefreshInterval;
 extern int g_nBackfillRefreshIntervalSec;
 extern int g_nTimeShift;
 extern CString g_oServer;
-extern CString g_oApiKey;  // API Key for authentication
-extern CString g_oWebSocketUrl;  // WebSocket URL for real-time data
+extern CString g_oApiKey;
+extern CString g_oWebSocketUrl;
 extern int g_nStatus;
 
-// Backfill request tracking
+// FYERS direct mode
+extern BOOL g_bDirectFyersMode;
+extern CString g_fyersAppId;
+extern CString g_fyersAccessToken;
+extern int g_fyersGapCheckIntervalSec;
+
+// Legacy backfill tracking
 extern int g_nBackfillDays;
 extern int g_nBackfillPeriodicity;
 extern BOOL g_bBackfillRequested;
 
-// Real-time candle building settings
+// Legacy real-time candle setting retained for compatibility
 extern BOOL g_bRealTimeCandlesEnabled;
 extern int g_nBackfillIntervalMs;
 
-// HTTP response caching (performance optimization)
-// Cache HTTP responses to avoid calling HTTP API on every GetQuotesEx() call
-extern CMapStringToPtr g_HttpResponseCache;  // Maps "SYMBOL-PERIODICITY" → last HTTP response time (DWORD*)
+// Legacy OpenAlgo HTTP cache declarations
+extern CMapStringToPtr g_HttpResponseCache;
 extern CRITICAL_SECTION g_HttpCacheCriticalSection;
-extern const DWORD HTTP_CACHE_LIFETIME_MS;  // How long to cache HTTP responses (default: 60000ms = 60 seconds)
+extern const DWORD HTTP_CACHE_LIFETIME_MS;
 
-// Global function declarations
+// Legacy helpers
 CString GetAvailableSymbols(void);
 CString BuildOpenAlgoURL(const CString& server, int port, const CString& endpoint);
-// AddToOpenAlgoPortfolio is internal to Plugin.cpp, not needed here
 
-// Direct-registry API-key persistence (bypasses MFC's WriteProfileString,
-// which had been failing silently for this specific value).
-// Both functions target HKCU\Software\OpenAlgo\OpenAlgo\OpenAlgo\ApiKey,
-// the same path MFC would use, so anything written here is also visible to
-// any existing MFC read path.
 BOOL WriteApiKeyDirect(const CString& key);
 BOOL ReadApiKeyDirect(CString& outKey);
+
+// FYERS direct API
+BOOL FyersDirectInit(void);
+void FyersDirectRelease(void);
+BOOL FyersDirectNotify(struct PluginNotification* pn);
+BOOL FyersDirectGetQuotesEx(LPCTSTR pszTicker, int nPeriodicity, int nLastValid,
+                            int nSize, struct Quotation* pQuotes);
+struct RecentInfo* FyersDirectGetRecentInfo(LPCTSTR pszTicker);
+BOOL FyersDirectReconfigure(CString appId, CString accessToken);
+BOOL FyersTestRestConnection(void);
+BOOL FyersTestWebSocket(void);
+void FyersRequestReconnect(void);
 
 #endif // OPENALGO_GLOBALS_H
