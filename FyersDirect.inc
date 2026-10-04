@@ -12,7 +12,7 @@
 //
 // FYERS current data API:
 //   REST  https://api-t1.fyers.in/data
-//   WS    wss://api.fyers.in/socket/v2/data/
+//   Data WS  wss://socket.fyers.in/hsm/v1-5/prod
 //   Auth  Authorization: <app_id>:<access_token>
 // -----------------------------------------------------------------------------
 
@@ -21,6 +21,7 @@
 #include <vector>
 #include <algorithm>
 #include <cmath>
+#include <stdint.h>
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "crypt32.lib")
 
@@ -74,10 +75,38 @@ struct FyersHistoryJob
 	FyersHistoryJob() : periodicity(0), startTs(0), endTs(0), initialLoad(FALSE) {}
 };
 
+struct FyersHsmSnapshot
+{
+	float ltp;
+	float totalVol;
+	float tradeQty;
+	float oi;
+	float bid;
+	float ask;
+	float open;
+	float high;
+	float low;
+	float prevClose;
+	time_t lastTradeTime;
+	time_t exchangeFeedTime;
+	double priceScale;
+	BOOL valid;
+
+	FyersHsmSnapshot()
+		: ltp(0), totalVol(0), tradeQty(0), oi(0), bid(0), ask(0),
+		  open(0), high(0), low(0), prevClose(0),
+		  lastTradeTime(0), exchangeFeedTime(0), priceScale(100.0),
+		  valid(FALSE)
+	{}
+};
+
 struct FyersSymbolState
 {
 	CString amiTicker;
 	CString fyersSymbol;
+	CString hsmToken;
+	WORD topicId;
+	FyersHsmSnapshot snapshot;
 
 	CArray<Quotation, Quotation> fiveSecBars;
 	CArray<Quotation, Quotation> dailyBars;
@@ -147,6 +176,8 @@ static CWinThread* g_pFyersWsThread = NULL;
 static volatile LONG g_bFyersWsShouldStop = 0;
 static volatile LONG g_bFyersForceReconnect = 0;
 static HANDLE g_hFyersConnectedEvent = NULL;
+static HANDLE g_hFyersAuthenticatedEvent = NULL;
+static CString g_fyersLastError;
 
 static CString FyersTrim(CString value)
 {
@@ -157,21 +188,23 @@ static CString FyersTrim(CString value)
 static CString FyersNormalizeAppId(CString appId)
 {
 	appId.Trim();
-	if (appId.IsEmpty())
-		return appId;
-
-	// FYERS has used both -100 data-app IDs and -200 IDs for newer apps.
-	// Never rewrite an explicit suffix. Only add the legacy -100 suffix when
-	// the user supplied a bare app ID without any suffix.
-	CString suffix = appId.Right(4);
-	if (suffix.CompareNoCase(_T("-100")) != 0 &&
-		suffix.CompareNoCase(_T("-200")) != 0 &&
-		appId.Find(_T('-')) < 0)
-	{
-		appId += _T("-100");
-	}
-
+	// Preserve the App ID exactly as issued by FYERS. Current apps may use
+	// suffixes such as -100 or -200; never guess or rewrite the ID.
 	return appId;
+}
+
+static CString FyersNormalizeAccessToken(CString token)
+{
+	token.Trim();
+	// Accept raw JWT or APP_ID:TOKEN for convenience, but store/use only JWT.
+	int colon = token.Find(_T(':'));
+	if (colon > 0 && token.Find(_T(':'), colon + 1) < 0 &&
+		(token.Left(colon).Find(_T('-')) >= 0))
+	{
+		token = token.Mid(colon + 1);
+		token.Trim();
+	}
+	return token;
 }
 
 static void FyersResetStatesForDatabase(void)
@@ -192,6 +225,9 @@ static void FyersResetStatesForDatabase(void)
 
 		state->fiveSecBars.RemoveAll();
 		state->dailyBars.RemoveAll();
+		state->hsmToken.Empty();
+		state->topicId = 0;
+		state->snapshot = FyersHsmSnapshot();
 		memset(&state->currentBar, 0, sizeof(state->currentBar));
 		state->currentBarStarted = FALSE;
 		state->currentBarStart = 0;
@@ -547,38 +583,193 @@ static CString FyersUrlEncode(CString value)
 	return CString(FyersUrlEncodeA(CStringA(value)));
 }
 
+
+static CString FyersWinHttpErrorText(DWORD code)
+{
+\tchar buf[512] = {0};
+\tDWORD n = FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+\t                         NULL, code, 0, buf, (DWORD)sizeof(buf), NULL);
+\tCString msg;
+\tif (n > 0)
+\t{
+\t\tmsg = CString(buf);
+\t\tmsg.Trim();
+\t}
+\tif (msg.IsEmpty())
+\t\tmsg.Format(_T("WinHTTP error %lu"), (unsigned long)code);
+\treturn msg;
+}
+
+static void FyersSetLastError(const CString& message)
+{
+\tg_fyersLastError = message;
+\tOutputDebugString(message);
+\tOutputDebugString(_T("\r\n"));
+}
+
+static void FyersSetWinHttpError(LPCTSTR where, DWORD code)
+{
+\tCString msg;
+\tmsg.Format(_T("%s: %s (code %lu)"), where,
+\t           (LPCTSTR)FyersWinHttpErrorText(code),
+\t           (unsigned long)code);
+\tFyersSetLastError(msg);
+}
+
+static BOOL FyersReadHttpResponse(HINTERNET hRequest, CStringA& response)
+{
+\tresponse.Empty();
+\tfor (;;)
+\t{
+\t\tDWORD available = 0;
+\t\tif (!WinHttpQueryDataAvailable(hRequest, &available))
+\t\t{
+\t\t\tFyersSetWinHttpError(_T("WinHttpQueryDataAvailable"), GetLastError());
+\t\t\treturn FALSE;
+\t\t}
+\t\tif (!available) break;
+\t\tstd::vector<char> buf((size_t)available + 1, 0);
+\t\tDWORD read = 0;
+\t\tif (!WinHttpReadData(hRequest, buf.data(), available, &read))
+\t\t{
+\t\t\tFyersSetWinHttpError(_T("WinHttpReadData"), GetLastError());
+\t\t\treturn FALSE;
+\t\t}
+\t\tif (read) response.Append(buf.data(), (int)read);
+\t}
+\treturn TRUE;
+}
+
 static BOOL FyersHttpGet(const CString& pathAndQuery, CStringA& response, DWORD& statusCode)
 {
-    response.Empty(); statusCode = 0;
-    if (g_fyersAppId.IsEmpty() || g_fyersAccessToken.IsEmpty()) return FALSE;
-    HINTERNET hSession=NULL,hConnect=NULL,hRequest=NULL; BOOL ok=FALSE;
-    DWORD size=sizeof(statusCode);
-    CStringW pathW(pathAndQuery), appIdW(FyersNormalizeAppId(g_fyersAppId));
-    CStringW tokenW(g_fyersAccessToken), auth;
-    hSession=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
-    if(!hSession) goto cleanup;
-    WinHttpSetTimeouts(hSession,5000,5000,10000,10000);
-    hConnect=WinHttpConnect(hSession,FYERS_DIRECT_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);
-    if(!hConnect) goto cleanup;
-    hRequest=WinHttpOpenRequest(hConnect,L"GET",(LPCWSTR)pathW,NULL,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);
-    if(!hRequest) goto cleanup;
-    auth.Format(L"Authorization: %s:%s\r\n",(LPCWSTR)appIdW,(LPCWSTR)tokenW);
-    if(!WinHttpAddRequestHeaders(hRequest,(LPCWSTR)auth,(DWORD)-1L,WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE)) goto cleanup;
-    if(!WinHttpSendRequest(hRequest,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)) goto cleanup;
-    if(!WinHttpReceiveResponse(hRequest,NULL)) goto cleanup;
-    WinHttpQueryHeaders(hRequest,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&statusCode,&size,WINHTTP_NO_HEADER_INDEX);
-    for(;;){
-        DWORD available=0;
-        if(!WinHttpQueryDataAvailable(hRequest,&available)) goto cleanup;
-        if(!available) break;
-        std::vector<char> buf(available+1,0); DWORD read=0;
-        if(!WinHttpReadData(hRequest,buf.data(),available,&read)) goto cleanup;
-        if(read) response.Append(buf.data(),(int)read);
-    }
-    ok=(statusCode>=200 && statusCode<300);
+\tresponse.Empty();
+\tstatusCode = 0;
+
+\tif (g_fyersAppId.IsEmpty() || g_fyersAccessToken.IsEmpty())
+\t{
+\t\tFyersSetLastError(_T("FYERS REST: App ID or Access Token is empty."));
+\t\treturn FALSE;
+\t}
+
+\tHINTERNET hSession=NULL,hConnect=NULL,hRequest=NULL;
+\tBOOL ok=FALSE;
+\tCStringW pathW(pathAndQuery), appIdW(FyersNormalizeAppId(g_fyersAppId)),
+\t          tokenW(FyersNormalizeAccessToken(g_fyersAccessToken)), auth;
+\tauth.Format(L"Authorization: %s:%s\r\n",(LPCWSTR)appIdW,(LPCWSTR)tokenW);
+
+\thSession=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin/1.0",
+\t\tWINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,
+\t\tWINHTTP_NO_PROXY_BYPASS,0);
+\tif(!hSession){FyersSetWinHttpError(_T("WinHttpOpen"),GetLastError());goto cleanup;}
+\tWinHttpSetTimeouts(hSession,5000,5000,10000,10000);
+
+\thConnect=WinHttpConnect(hSession,FYERS_DIRECT_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);
+\tif(!hConnect){FyersSetWinHttpError(_T("WinHttpConnect(api-t1.fyers.in)"),GetLastError());goto cleanup;}
+
+\thRequest=WinHttpOpenRequest(hConnect,L"GET",(LPCWSTR)pathW,NULL,
+\tWINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);
+\tif(!hRequest){FyersSetWinHttpError(_T("WinHttpOpenRequest"),GetLastError());goto cleanup;}
+
+\t{
+\t\tCStringW headers=auth;
+\t\theaders+=L"Content-Type: application/json\r\nAccept: application/json\r\nversion: 3\r\n";
+\t\tif(!WinHttpAddRequestHeaders(hRequest,(LPCWSTR)headers,(DWORD)-1L,
+\t\t\tWINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE))
+\t\t{FyersSetWinHttpError(_T("WinHttpAddRequestHeaders"),GetLastError());goto cleanup;}
+\t}
+
+\tif(!WinHttpSendRequest(hRequest,WINHTTP_NO_ADDITIONAL_HEADERS,0,
+\t\tWINHTTP_NO_REQUEST_DATA,0,0,0))
+\t{FyersSetWinHttpError(_T("WinHttpSendRequest"),GetLastError());goto cleanup;}
+
+\tif(!WinHttpReceiveResponse(hRequest,NULL))
+\t{FyersSetWinHttpError(_T("WinHttpReceiveResponse"),GetLastError());goto cleanup;}
+
+\t{
+\t\tDWORD size=sizeof(statusCode);
+\t\tif(!WinHttpQueryHeaders(hRequest,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,
+\t\t\tWINHTTP_HEADER_NAME_BY_INDEX,&statusCode,&size,WINHTTP_NO_HEADER_INDEX))
+\t\t{FyersSetWinHttpError(_T("WinHttpQueryHeaders"),GetLastError());goto cleanup;}
+\t}
+
+\tif(!FyersReadHttpResponse(hRequest,response)) goto cleanup;
+\tok=(statusCode>=200 && statusCode<300);
+
+\tif(!ok)
+\t{
+\t\tCString msg;
+\t\tmsg.Format(_T("FYERS REST HTTP %lu"),(unsigned long)statusCode);
+\t\tif(!response.IsEmpty()){CString p(response.Left(600));p.Trim();if(!p.IsEmpty()){msg+=_T(": ");msg+=p;}}
+\t\tFyersSetLastError(msg);
+\t}
+\telse
+\t\tFyersSetLastError(_T("FYERS REST: HTTP request succeeded."));
+
 cleanup:
-    if(hRequest) WinHttpCloseHandle(hRequest); if(hConnect) WinHttpCloseHandle(hConnect); if(hSession) WinHttpCloseHandle(hSession);
-    return ok;
+\tif(hRequest)WinHttpCloseHandle(hRequest);
+\tif(hConnect)WinHttpCloseHandle(hConnect);
+\tif(hSession)WinHttpCloseHandle(hSession);
+\treturn ok;
+}
+
+static BOOL FyersHttpPostJson(const CString& path,const CStringA& body,
+\tconst CStringA& authorization,CStringA& response,DWORD& statusCode)
+{
+\tresponse.Empty();statusCode=0;
+\tif(authorization.IsEmpty()){FyersSetLastError(_T("FYERS POST: authorization token is empty."));return FALSE;}
+
+\tHINTERNET hSession=NULL,hConnect=NULL,hRequest=NULL;BOOL ok=FALSE;
+\tCStringW pathW(path),authW;
+\tCStringW authSrc(CString(authorization));
+\tauthW.Format(L"Authorization: %s\r\n",(LPCWSTR)authSrc);
+
+\thSession=WinHttpOpen(L"FYERS Direct AmiBroker Plugin/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+\t\tWINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
+\tif(!hSession){FyersSetWinHttpError(_T("WinHttpOpen(POST)"),GetLastError());goto cleanup;}
+\tWinHttpSetTimeouts(hSession,5000,5000,10000,10000);
+\thConnect=WinHttpConnect(hSession,FYERS_DIRECT_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);
+\tif(!hConnect){FyersSetWinHttpError(_T("WinHttpConnect(POST)"),GetLastError());goto cleanup;}
+\thRequest=WinHttpOpenRequest(hConnect,L"POST",(LPCWSTR)pathW,NULL,WINHTTP_NO_REFERER,
+\t\tWINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);
+\tif(!hRequest){FyersSetWinHttpError(_T("WinHttpOpenRequest(POST)"),GetLastError());goto cleanup;}
+
+\t{
+\t\tCStringW headers=authW;
+\t\theaders+=L"Content-Type: application/json\r\nAccept: application/json\r\n";
+\t\tif(!WinHttpAddRequestHeaders(hRequest,(LPCWSTR)headers,(DWORD)-1L,
+\t\t\tWINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE))
+\t\t{FyersSetWinHttpError(_T("WinHttpAddRequestHeaders(POST)"),GetLastError());goto cleanup;}
+\t}
+
+\tCStringA payload=body;
+\tif(!WinHttpSendRequest(hRequest,WINHTTP_NO_ADDITIONAL_HEADERS,0,(PVOID)payload.GetString(),
+\t\t(DWORD)payload.GetLength(),(DWORD)payload.GetLength(),0))
+\t{FyersSetWinHttpError(_T("WinHttpSendRequest(POST)"),GetLastError());goto cleanup;}
+
+\tif(!WinHttpReceiveResponse(hRequest,NULL))
+\t{FyersSetWinHttpError(_T("WinHttpReceiveResponse(POST)"),GetLastError());goto cleanup;}
+
+\t{
+\t\tDWORD size=sizeof(statusCode);
+\t\tif(!WinHttpQueryHeaders(hRequest,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,
+\t\t\tWINHTTP_HEADER_NAME_BY_INDEX,&statusCode,&size,WINHTTP_NO_HEADER_INDEX))
+\t\t{FyersSetWinHttpError(_T("WinHttpQueryHeaders(POST)"),GetLastError());goto cleanup;}
+\t}
+
+\tif(!FyersReadHttpResponse(hRequest,response)) goto cleanup;
+\tok=(statusCode>=200 && statusCode<300);
+\tif(!ok)
+\t{
+\t\tCString msg;
+\t\tmsg.Format(_T("FYERS POST HTTP %lu"),(unsigned long)statusCode);
+\t\tif(!response.IsEmpty()){CString p(response.Left(600));p.Trim();if(!p.IsEmpty()){msg+=_T(": ");msg+=p;}}
+\t\tFyersSetLastError(msg);
+\t}
+cleanup:
+\tif(hRequest)WinHttpCloseHandle(hRequest);
+\tif(hConnect)WinHttpCloseHandle(hConnect);
+\tif(hSession)WinHttpCloseHandle(hSession);
+\treturn ok;
 }
 
 static BOOL FyersParseNumber(const CStringA& json, int& pos, double& value)
@@ -1037,476 +1228,345 @@ static BOOL FyersCredentialsReady(void)
 
 BOOL FyersTestRestConnection(void)
 {
-	CStringA response;
-	DWORD status = 0;
-
-	CString symbol = FyersUrlEncode(_T("NSE:NIFTY50-INDEX"));
-	CString path;
-	path.Format(_T("%s?symbols=%s"),
-	            FYERS_DIRECT_QUOTES_PATH, (LPCTSTR)symbol);
-
-	return FyersHttpGet(path, response, status);
+\tCStringA response;DWORD status=0;CString symbol=FyersUrlEncode(_T("NSE:NIFTY50-INDEX"));
+\tCString path;path.Format(_T("%s?symbols=%s"),FYERS_DIRECT_QUOTES_PATH,(LPCTSTR)symbol);
+\tif(!FyersHttpGet(path,response,status))return FALSE;
+\tCString s=ExtractJsonStringValue(CString(response),_T("s"));
+\tif(s.CompareNoCase(_T("ok"))!=0){CString m=ExtractJsonStringValue(CString(response),_T("message"));if(m.IsEmpty())m=_T("FYERS returned a non-ok response.");FyersSetLastError(m);return FALSE;}
+\tFyersSetLastError(_T("FYERS REST: authentication + quotes request succeeded."));return TRUE;
 }
 
-static BOOL FyersSendWebSocketUtf8(const CStringA& message)
+static void FyersQueueHistoryJob(const CString& ticker,int periodicity,time_t startTs,time_t endTs,BOOL initialLoad);
+
+static uint16_t FyersReadBE16(const BYTE* data,size_t len,size_t& off,BOOL& ok)
 {
-	BOOL result = FALSE;
-
-	if (!g_fyersWsIoCSInitialized || !g_fyersWsCSInitialized)
-		return FALSE;
-
-	EnterCriticalSection(&g_fyersWsIoCS);
-
-	HINTERNET ws = NULL;
-	EnterCriticalSection(&g_fyersWsCS);
-	ws = g_hFyersWebSocket;
-	LeaveCriticalSection(&g_fyersWsCS);
-
-	if (ws)
-	{
-		DWORD rc = WinHttpWebSocketSend(
-			ws,
-			WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE,
-			(PVOID)message.GetString(),
-			(DWORD)message.GetLength());
-		result = (rc == NO_ERROR);
-	}
-
-	LeaveCriticalSection(&g_fyersWsIoCS);
-	return result;
+\tif(!data||off+2>len){ok=FALSE;return 0;}
+\tuint16_t v=(uint16_t)(((uint16_t)data[off]<<8)|data[off+1]);off+=2;return v;
+}
+static uint32_t FyersReadBE32(const BYTE* data,size_t len,size_t& off,BOOL& ok)
+{
+\tif(!data||off+4>len){ok=FALSE;return 0;}
+\tuint32_t v=((uint32_t)data[off]<<24)|((uint32_t)data[off+1]<<16)|
+\t           ((uint32_t)data[off+2]<<8)|(uint32_t)data[off+3];off+=4;return v;
+}
+static int32_t FyersReadBEI32(const BYTE* data,size_t len,size_t& off,BOOL& ok)
+{
+\treturn (int32_t)FyersReadBE32(data,len,off,ok);
+}
+static BOOL FyersReadHsmString(const BYTE* data,size_t len,size_t& off,CStringA& out)
+{
+\tout.Empty();if(!data||off>=len)return FALSE;BYTE n=data[off++];if(off+n>len)return FALSE;
+\tif(n)out.Append((LPCSTR)(data+off),(int)n);off+=n;return TRUE;
 }
 
-static BOOL FyersSendSubscribeSymbol(const CString& ticker)
+static BOOL FyersSendWebSocketBinary(const BYTE* data,DWORD size)
 {
-	FyersSymbolState* state = FyersGetOrCreateState(ticker);
-	if (!state)
-		return FALSE;
-
-	CStringA fyersSymbolA(state->fyersSymbol);
-	CStringA json;
-	json.Format("{\"symbol\":[\"%s\"],\"type\":\"symbolUpdate\"}",
-	            (LPCSTR)fyersSymbolA);
-
-	return FyersSendWebSocketUtf8(json);
+\tif(!data||size==0||!g_fyersWsIoCSInitialized||!g_fyersWsCSInitialized)return FALSE;
+\tBOOL result=FALSE;
+\tEnterCriticalSection(&g_fyersWsIoCS);
+\tHINTERNET ws=NULL;
+\tEnterCriticalSection(&g_fyersWsCS);ws=g_hFyersWebSocket;LeaveCriticalSection(&g_fyersWsCS);
+\tif(ws)
+\t{
+\t\tDWORD rc=WinHttpWebSocketSend(ws,WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE,(PVOID)data,size);
+\t\tresult=(rc==NO_ERROR);
+\t\tif(!result)FyersSetWinHttpError(_T("WinHttpWebSocketSend"),rc);
+\t}
+\tLeaveCriticalSection(&g_fyersWsIoCS);
+\treturn result;
+}
+static BOOL FyersSendWebSocketBinary(const std::vector<BYTE>& data)
+{
+\treturn data.empty()?FALSE:FyersSendWebSocketBinary(data.data(),(DWORD)data.size());
 }
 
-static void FyersSubscribeAll(void)
+static int FyersBase64UrlValue(char c)
 {
-	std::vector<CString> symbols;
+\tif(c>='A'&&c<='Z')return c-'A';if(c>='a'&&c<='z')return c-'a'+26;
+\tif(c>='0'&&c<='9')return c-'0'+52;if(c=='-')return 62;if(c=='_')return 63;return -1;
+}
+static BOOL FyersBase64UrlDecode(const CStringA& in,std::vector<BYTE>& out)
+{
+\tout.clear();int acc=0,bits=0;
+\tfor(int i=0;i<in.GetLength();i++){char ch=in[i];if(ch=='=')break;int v=FyersBase64UrlValue(ch);if(v<0)return FALSE;
+\t\tacc=(acc<<6)|v;bits+=6;if(bits>=8){bits-=8;out.push_back((BYTE)((acc>>bits)&0xFF));}}
+\treturn !out.empty();
+}
+static BOOL FyersExtractHsmKeyFromAccessToken(CString& hsmKey)
+{
+\thsmKey.Empty();CString token=FyersNormalizeAccessToken(g_fyersAccessToken);
+\tint d1=token.Find(_T('.')),d2=d1>=0?token.Find(_T('.'),d1+1):-1;
+\tif(d1<=0||d2<=d1+1){FyersSetLastError(_T("FYERS WebSocket: Access Token is not a 3-part JWT."));return FALSE;}
+\tCStringA payloadB64(CStringA(token.Mid(d1+1,d2-d1-1)));std::vector<BYTE> decoded;
+\tif(!FyersBase64UrlDecode(payloadB64,decoded)){FyersSetLastError(_T("FYERS WebSocket: JWT payload decode failed."));return FALSE;}
+\tdecoded.push_back(0);CString payload((LPCSTR)decoded.data());
+\tCString expRaw=ExtractJsonRawValue(payload,_T("exp"));
+\tif(!expRaw.IsEmpty()){__int64 exp=_tstoi64(expRaw);if(exp>0&&exp<(__int64)time(NULL)){FyersSetLastError(_T("FYERS WebSocket: Access Token is expired."));return FALSE;}}
+\thsmKey=ExtractJsonStringValue(payload,_T("hsm_key"));
+\tif(hsmKey.IsEmpty()){FyersSetLastError(_T("FYERS WebSocket: JWT has no hsm_key."));return FALSE;}
+\treturn TRUE;
+}
 
-	EnterCriticalSection(&g_fyersStateCS);
-	POSITION pos = g_fyersStates.GetStartPosition();
-	while (pos != NULL)
-	{
-		CString key;
-		FyersSymbolState* state = NULL;
-		g_fyersStates.GetNextAssoc(pos, key, state);
-		if (state && state->subscribed)
-			symbols.push_back(state->fyersSymbol);
-	}
-	LeaveCriticalSection(&g_fyersStateCS);
+static CString FyersExchangeSegment(const CString& ex)
+{
+\tif(ex==_T("1010"))return _T("nse_cm");if(ex==_T("1011"))return _T("nse_fo");
+\tif(ex==_T("1120"))return _T("mcx_fo");if(ex==_T("1210"))return _T("bse_cm");
+\tif(ex==_T("1211"))return _T("bse_fo");if(ex==_T("1212"))return _T("bcs_fo");
+\tif(ex==_T("1012"))return _T("cde_fo");if(ex==_T("1020"))return _T("nse_com");
+\treturn CString();
+}
+static CString FyersIndexHsmName(const CString& symbol)
+{
+\tCString s=symbol;s.MakeUpper();struct Pair{LPCTSTR a;LPCTSTR b;};
+\tstatic const Pair p[]={
+\t\t{_T("NSE:NIFTY50-INDEX"),_T("Nifty 50")},{_T("NSE:NIFTYBANK-INDEX"),_T("Nifty Bank")},
+\t\t{_T("NSE:FINNIFTY-INDEX"),_T("Nifty Fin Service")},{_T("NSE:MIDCPNIFTY-INDEX"),_T("NIFTY MID SELECT")},
+\t\t{_T("NSE:NIFTYMIDSELECT-INDEX"),_T("NIFTY MID SELECT")},{_T("NSE:NIFTYNEXT50-INDEX"),_T("Nifty Next 50")},
+\t\t{_T("NSE:NIFTYNXT50-INDEX"),_T("Nifty Next 50")},{_T("NSE:NIFTY100-INDEX"),_T("Nifty 100")},
+\t\t{_T("NSE:NIFTY200-INDEX"),_T("Nifty 200")},{_T("NSE:NIFTY500-INDEX"),_T("Nifty 500")},
+\t\t{_T("NSE:INDIAVIX-INDEX"),_T("India VIX")},{_T("NSE:NIFTYIT-INDEX"),_T("Nifty IT")},
+\t\t{_T("NSE:NIFTYAUTO-INDEX"),_T("Nifty Auto")},{_T("NSE:NIFTYPHARMA-INDEX"),_T("Nifty Pharma")},
+\t\t{_T("NSE:NIFTYMETAL-INDEX"),_T("Nifty Metal")},{_T("NSE:NIFTYFMCG-INDEX"),_T("Nifty FMCG")},
+\t\t{_T("NSE:NIFTYREALTY-INDEX"),_T("Nifty Realty")},{_T("NSE:NIFTYENERGY-INDEX"),_T("Nifty Energy")},
+\t\t{_T("NSE:NIFTYINFRA-INDEX"),_T("Nifty Infra")},{_T("NSE:NIFTYCPSE-INDEX"),_T("Nifty CPSE")},
+\t\t{_T("NSE:NIFTYPSE-INDEX"),_T("Nifty PSE")},{_T("NSE:NIFTYPSUBANK-INDEX"),_T("Nifty PSU Bank")},
+\t\t{_T("NSE:NIFTYCOMMODITIES-INDEX"),_T("Nifty Commodities")},{_T("NSE:NIFTYCONSUMPTION-INDEX"),_T("Nifty Consumption")}
+\t};
+\tfor(size_t i=0;i<sizeof(p)/sizeof(p[0]);i++)if(s==p[i].a)return p[i].b;
+\tint colon=s.Find(_T(':'));if(colon>=0)s=s.Mid(colon+1);int d=s.Find(_T("-INDEX"));if(d>0)s=s.Left(d);return s;
+}
+static CString FyersExtractValidSymbolToken(const CStringA& response,const CString& symbol)
+{
+\tint p=response.Find("\"validSymbol\"");if(p<0)return CString();
+\tCStringA needle;needle.Format("\"%s\"",(LPCSTR)CStringA(symbol));int k=response.Find(needle,p);if(k<0)return CString();
+\tint colon=response.Find(':',k+needle.GetLength());if(colon<0)return CString();
+\tint q1=response.Find('"',colon+1),q2=q1>=0?response.Find('"',q1+1):-1;if(q1<0||q2<=q1)return CString();
+\treturn CString(response.Mid(q1+1,q2-q1-1));
+}
+static CString FyersBuildHsmToken(const CString& symbol,const CString& fyToken)
+{
+\tif(fyToken.GetLength()<4)return CString();CString seg=FyersExchangeSegment(fyToken.Left(4));if(seg.IsEmpty())return CString();
+\tCString upper=symbol;upper.MakeUpper();BOOL index=(upper.Right(6)==_T("-INDEX"));
+\tif(index){CString n=FyersIndexHsmName(symbol);CString h;h.Format(_T("if|%s|%s"),(LPCTSTR)seg,(LPCTSTR)n);return h;}
+\tCString exToken;if(fyToken.GetLength()>10)exToken=fyToken.Mid(10);
+\tif(exToken.IsEmpty()){int d=fyToken.ReverseFind(_T('|'));if(d>=0)exToken=fyToken.Mid(d+1);}
+\tif(exToken.IsEmpty())return CString();CString h;h.Format(_T("sf|%s|%s"),(LPCTSTR)seg,(LPCTSTR)exToken);return h;
+}
 
-	for (size_t i = 0; i < symbols.size(); i++)
-	{
-		CStringA fyersSymbolA(symbols[i]);
-		CStringA json;
-		json.Format("{\"symbol\":[\"%s\"],\"type\":\"symbolUpdate\"}",
-		            (LPCSTR)fyersSymbolA);
-		FyersSendWebSocketUtf8(json);
-	}
+static BOOL FyersSendHsmSubscribe(const std::vector<CString>& hsmTokens)
+{
+\tif(hsmTokens.empty())return TRUE;std::vector<BYTE> sd;sd.push_back(0);sd.push_back(0);
+\tfor(size_t i=0;i<hsmTokens.size();i++){CStringA s(hsmTokens[i]);if(s.GetLength()>255){FyersSetLastError(_T("FYERS WebSocket: HSM token too long."));return FALSE;}
+\t\tsd.push_back((BYTE)s.GetLength());sd.insert(sd.end(),(BYTE*)s.GetString(),(BYTE*)s.GetString()+s.GetLength());}
+\tsd[0]=(BYTE)(hsmTokens.size()>>8);sd[1]=(BYTE)(hsmTokens.size()&0xFF);
+\tsize_t total=18+sd.size();if(total>65535){FyersSetLastError(_T("FYERS WebSocket: subscription packet too large."));return FALSE;}
+\tstd::vector<BYTE> msg(total,0);uint16_t dl=(uint16_t)(total-2);msg[0]=(BYTE)(dl>>8);msg[1]=(BYTE)dl;
+\tmsg[2]=4;msg[3]=2;msg[4]=1;msg[5]=(BYTE)(sd.size()>>8);msg[6]=(BYTE)sd.size();memcpy(msg.data()+7,sd.data(),sd.size());
+\tsize_t off=7+sd.size();msg[off++]=2;msg[off++]=0;msg[off++]=1;msg[off++]=11;
+\treturn FyersSendWebSocketBinary(msg);
+}
+
+static BOOL FyersSubscribeAll(void)
+{
+\tif(!FyersCredentialsReady())return FALSE;std::vector<CString> tickers;
+\tEnterCriticalSection(&g_fyersStateCS);POSITION pos=g_fyersStates.GetStartPosition();
+\twhile(pos){CString k;FyersSymbolState* s=NULL;g_fyersStates.GetNextAssoc(pos,k,s);if(s&&s->subscribed)tickers.push_back(s->amiTicker);}
+\tLeaveCriticalSection(&g_fyersStateCS);if(tickers.empty())return TRUE;
+
+\tfor(size_t base=0;base<tickers.size();base+=100)
+\t{
+\t\tsize_t count=min((size_t)100,tickers.size()-base);CStringA body("{\"symbols\":[");
+\t\tfor(size_t i=0;i<count;i++){if(i)body+=",";CStringA sym(tickers[base+i]);body+="\"";body+=sym;body+="\"";}body+="]}";
+\t\tCStringA response;DWORD status=0;
+\t\tif(!FyersHttpPostJson(FYERS_DIRECT_SYMBOL_TOKEN_PATH,body,CStringA(g_fyersAccessToken),response,status))
+\t\t\treturn FALSE;
+\t\tCString st=ExtractJsonStringValue(CString(response),_T("s"));
+\t\tif(st.CompareNoCase(_T("ok"))!=0){CString m=ExtractJsonStringValue(CString(response),_T("message"));if(m.IsEmpty())m=_T("FYERS /data/symbol-token returned an error.");FyersSetLastError(m);return FALSE;}
+
+\t\tstd::vector<CString> hsm;
+\t\tfor(size_t i=0;i<count;i++)
+\t\t{
+\t\t\tCString ticker=tickers[base+i],fy=FyersExtractValidSymbolToken(response,ticker),hs=FyersBuildHsmToken(ticker,fy);
+\t\t\tif(hs.IsEmpty()){CString m;m.Format(_T("FYERS: could not convert symbol to HSM token: %s"),(LPCTSTR)ticker);FyersSetLastError(m);continue;}
+\t\t\tEnterCriticalSection(&g_fyersStateCS);FyersSymbolState* s=NULL;if(g_fyersStates.Lookup(ticker,s)&&s){s->hsmToken=hs;s->topicId=0;}LeaveCriticalSection(&g_fyersStateCS);
+\t\t\thsm.push_back(hs);
+\t\t}
+\t\tfor(size_t i=0;i<hsm.size();i+=500){size_t n=min((size_t)500,hsm.size()-i);std::vector<CString> chunk(hsm.begin()+i,hsm.begin()+i+n);if(!FyersSendHsmSubscribe(chunk))return FALSE;}
+\t}
+\tFyersSetLastError(_T("FYERS WebSocket: subscription request sent."));
+\treturn TRUE;
 }
 
 static BOOL FyersEnsureSubscribed(LPCTSTR pszTicker)
 {
-	FyersSymbolState* state = FyersGetOrCreateState(pszTicker);
-	if (!state)
-		return FALSE;
-
-	BOOL fresh = FALSE;
-	EnterCriticalSection(&g_fyersStateCS);
-	if (!state->subscribed)
-	{
-		state->subscribed = TRUE;
-		fresh = TRUE;
-	}
-	LeaveCriticalSection(&g_fyersStateCS);
-
-	if (fresh)
-	{
-		// If the socket is already up, add this symbol immediately. If it isn't,
-		// FyersSubscribeAll() will include it on the next connection.
-		BOOL connected = FALSE;
-		EnterCriticalSection(&g_fyersWsCS);
-		connected = (g_hFyersWebSocket != NULL);
-		LeaveCriticalSection(&g_fyersWsCS);
-
-		if (connected)
-			FyersSendSubscribeSymbol(pszTicker);
-	}
-
-	return TRUE;
+\tFyersSymbolState* state=FyersGetOrCreateState(pszTicker);if(!state)return FALSE;BOOL fresh=FALSE;
+\tEnterCriticalSection(&g_fyersStateCS);if(!state->subscribed){state->subscribed=TRUE;fresh=TRUE;}LeaveCriticalSection(&g_fyersStateCS);
+\tif(fresh&&g_hFyersAuthenticatedEvent&&WaitForSingleObject(g_hFyersAuthenticatedEvent,0)==WAIT_OBJECT_0)FyersSubscribeAll();
+\treturn TRUE;
 }
 
-static BOOL FyersParseTimestampField(const CString& raw, time_t& outTs)
+static BOOL FyersParseTimestampField(const CString& raw,time_t& outTs)
 {
-	CString s = raw;
-	s.Trim();
-	if (s.IsEmpty())
-		return FALSE;
-
-	__int64 v = _tstoi64(s);
-	if (v > 1000000000000LL)
-		v /= 1000;
-
-	if (v < 1000000000LL)
-		return FALSE;
-
-	outTs = (time_t)v;
-	return TRUE;
+\tCString s=raw;s.Trim();if(s.IsEmpty())return FALSE;__int64 v=_tstoi64(s);if(v>1000000000000LL)v/=1000;if(v<1000000000LL)return FALSE;outTs=(time_t)v;return TRUE;
 }
-
 static FyersSymbolState* FyersFindStateByFyersSymbol(LPCTSTR sym)
 {
-    if(!sym||!*sym||!g_fyersStateCSInitialized) return NULL;
-    FyersSymbolState* result=NULL;
-    EnterCriticalSection(&g_fyersStateCS);
-    POSITION pos=g_fyersStates.GetStartPosition();
-    while(pos){CString key;FyersSymbolState* s=NULL;g_fyersStates.GetNextAssoc(pos,key,s);if(s&&s->fyersSymbol.CompareNoCase(sym)==0){result=s;break;}}
-    LeaveCriticalSection(&g_fyersStateCS); return result;
+\tif(!sym||!*sym||!g_fyersStateCSInitialized)return NULL;FyersSymbolState* r=NULL;EnterCriticalSection(&g_fyersStateCS);
+\tPOSITION p=g_fyersStates.GetStartPosition();while(p){CString k;FyersSymbolState* s=NULL;g_fyersStates.GetNextAssoc(p,k,s);if(s&&s->fyersSymbol.CompareNoCase(sym)==0){r=s;break;}}LeaveCriticalSection(&g_fyersStateCS);return r;
+}
+static FyersSymbolState* FyersFindStateByHsmToken(LPCTSTR token)
+{
+\tif(!token||!*token||!g_fyersStateCSInitialized)return NULL;FyersSymbolState* r=NULL;EnterCriticalSection(&g_fyersStateCS);
+\tPOSITION p=g_fyersStates.GetStartPosition();while(p){CString k;FyersSymbolState* s=NULL;g_fyersStates.GetNextAssoc(p,k,s);if(s&&s->hsmToken.CompareNoCase(token)==0){r=s;break;}}LeaveCriticalSection(&g_fyersStateCS);return r;
+}
+static FyersSymbolState* FyersFindStateByTopicId(WORD id)
+{
+\tif(!id||!g_fyersStateCSInitialized)return NULL;FyersSymbolState* r=NULL;EnterCriticalSection(&g_fyersStateCS);
+\tPOSITION p=g_fyersStates.GetStartPosition();while(p){CString k;FyersSymbolState* s=NULL;g_fyersStates.GetNextAssoc(p,k,s);if(s&&s->topicId==id){r=s;break;}}LeaveCriticalSection(&g_fyersStateCS);return r;
 }
 
 static void FyersHandleMarketMessage(const CString& message)
 {
-	// FYERS SymbolUpdate messages are JSON objects with fields such as:
-	// symbol, ltp, vol_traded_today, last_traded_time, last_traded_qty,
-	// open_price, high_price, low_price, prev_close_price, bid_price, ask_price.
-	if (message.Find(_T("\"symbol\"")) < 0 ||
-	    message.Find(_T("\"ltp\"")) < 0)
-		return;
-
-	CString ticker = ExtractJsonStringValue(message, _T("symbol"));
-	if (ticker.IsEmpty())
-		return;
-
-	float ltp        = ExtractJsonFloatValue(message, _T("ltp"));
-	float open       = ExtractJsonFloatValue(message, _T("open_price"));
-	float high       = ExtractJsonFloatValue(message, _T("high_price"));
-	float low        = ExtractJsonFloatValue(message, _T("low_price"));
-	float prevClose  = ExtractJsonFloatValue(message, _T("prev_close_price"));
-	float totalVol   = ExtractJsonFloatValue(message, _T("vol_traded_today"));
-	float tradeQty   = ExtractJsonFloatValue(message, _T("last_traded_qty"));
-	float oi         = ExtractJsonFloatValue(message, _T("oi"));
-	float bid        = ExtractJsonFloatValue(message, _T("bid_price"));
-	float ask        = ExtractJsonFloatValue(message, _T("ask_price"));
-
-	CString rawTs = ExtractJsonRawValue(message, _T("last_traded_time"));
-	if (rawTs.IsEmpty())
-		rawTs = ExtractJsonRawValue(message, _T("timestamp"));
-
-	time_t tradeTs = 0;
-	if (!FyersParseTimestampField(rawTs, tradeTs) || tradeTs <= 0)
-		tradeTs = time(NULL);
-
-	if (ltp <= 0)
-		return;
-
-	FyersSymbolState* state = FyersFindStateByFyersSymbol(ticker);
-	if (!state)
-		return;
-
-	CString amiTicker = state->amiTicker;
-	time_t barStart = (tradeTs / FYERS_PERIOD_5SEC) * FYERS_PERIOD_5SEC;
-	time_t gapStart = 0;
-	time_t gapEnd = 0;
-	BOOL isTrade = TRUE;
-
-	EnterCriticalSection(&g_fyersStateCS);
-
-	// Detect a discontinuity in trade-time buckets before calculating the
-	// cumulative-volume delta. The missing interval will be repaired from REST.
-	BOOL gapDetectedBeforeVolume = FALSE;
-	if (state->currentBarStarted && barStart > state->currentBarStart + FYERS_PERIOD_5SEC)
-	{
-		gapDetectedBeforeVolume = TRUE;
-		gapStart = state->currentBarStart + FYERS_PERIOD_5SEC;
-		gapEnd = barStart - FYERS_PERIOD_5SEC;
-	}
-
-	// Calculate volume from the cumulative FYERS day volume whenever available.
-	// This avoids double-counting repeated SymbolUpdate frames.
-	float volumeDelta = 0.0f;
-	if (totalVol > 0.0f)
-	{
-		if (state->haveTotalVolume && totalVol >= state->lastTotalVolume)
-			volumeDelta = totalVol - state->lastTotalVolume;
-		else if (!state->haveTotalVolume)
-			volumeDelta = tradeQty;
-
-		state->lastTotalVolume = totalVol;
-		state->haveTotalVolume = TRUE;
-	}
-	else
-	{
-		volumeDelta = tradeQty;
-	}
-
-	// Do not put the cumulative missing volume into the new bar; REST will
-	// supply those missing 5-second candles.
-	if (gapDetectedBeforeVolume)
-		volumeDelta = tradeQty;
-
-	BOOL duplicateTrade = FALSE;
-	if (state->lastTradeTs == tradeTs && ltp == state->currentBar.Price &&
-	    fabs((double)volumeDelta) < 0.0001)
-		duplicateTrade = TRUE;
-
-	if (duplicateTrade)
-		isTrade = FALSE;
-
-	if (!state->currentBarStarted || barStart != state->currentBarStart)
-	{
-		if (state->currentBarStarted && state->currentBarStart > 0)
-		{
-			// Finalize the completed 5-second candle into the cache.
-			FyersUpsertQuotation(state->fiveSecBars, state->currentBar,
-			                     FYERS_MAX_5S_BARS);
-			state->lastCompleted5s = state->currentBarStart;
-		}
-
-		memset(&state->currentBar, 0, sizeof(state->currentBar));
-		ConvertUnixToPackedDate(barStart, &state->currentBar.DateTime);
-		state->currentBar.Open = ltp;
-		state->currentBar.High = ltp;
-		state->currentBar.Low = ltp;
-		state->currentBar.Price = ltp;
-		state->currentBar.Volume = max(0.0f, volumeDelta);
-		state->currentBar.OpenInterest = oi;
-		state->currentBarStart = barStart;
-		state->currentBarStarted = TRUE;
-	}
-	else
-	{
-		if (ltp > state->currentBar.High) state->currentBar.High = ltp;
-		if (ltp < state->currentBar.Low || state->currentBar.Low == 0.0f)
-			state->currentBar.Low = ltp;
-		state->currentBar.Price = ltp;
-		state->currentBar.Volume += max(0.0f, volumeDelta);
-		if (oi > 0) state->currentBar.OpenInterest = oi;
-	}
-
-	state->lastTradeTs = tradeTs;
-	state->lastLocalTickTick = (DWORD)GetTickCount64();
-
-	LeaveCriticalSection(&g_fyersStateCS);
-
-	FyersUpdateRecentInfo(amiTicker, ltp, open, high, low, prevClose,
-	                      totalVol, oi, bid, ask, tradeQty, isTrade);
-
-	// Repair after releasing the state lock.
-	if (gapStart > 0 && gapEnd >= gapStart)
-	{
-		// The provider only guarantees recent seconds history. The history
-		// worker will fetch what is available and merge it chronologically.
-		FyersHistoryJob job;
-		job.ticker = amiTicker;
-		job.periodicity = FYERS_PERIOD_5SEC;
-		job.startTs = gapStart;
-		job.endTs = gapEnd;
-		job.initialLoad = FALSE;
-
-		BOOL queueJob = FALSE;
-		EnterCriticalSection(&g_fyersStateCS);
-		if (!state->fiveSecFetchInProgress)
-		{
-			state->fiveSecFetchInProgress = TRUE;
-			queueJob = TRUE;
-		}
-		LeaveCriticalSection(&g_fyersStateCS);
-
-		if (queueJob && g_fyersHistoryQueueCSInitialized)
-		{
-			EnterCriticalSection(&g_fyersHistoryQueueCS);
-			g_fyersHistoryQueue.AddTail(job);
-			LeaveCriticalSection(&g_fyersHistoryQueueCS);
-			if (g_hFyersHistoryEvent) SetEvent(g_hFyersHistoryEvent);
-		}
-	}
-
-	if (g_hAmiBrokerWnd != NULL)
-		PostMessage(g_hAmiBrokerWnd, WM_USER_STREAMING_UPDATE, 0, 0);
+\tif(message.Find(_T("\"symbol\""))<0||message.Find(_T("\"ltp\""))<0)return;CString ticker=ExtractJsonStringValue(message,_T("symbol"));if(ticker.IsEmpty())return;
+\tfloat ltp=ExtractJsonFloatValue(message,_T("ltp")),open=ExtractJsonFloatValue(message,_T("open_price")),
+\t\thigh=ExtractJsonFloatValue(message,_T("high_price")),low=ExtractJsonFloatValue(message,_T("low_price")),
+\t\tprev=ExtractJsonFloatValue(message,_T("prev_close_price")),total=ExtractJsonFloatValue(message,_T("vol_traded_today")),
+\t\tqty=ExtractJsonFloatValue(message,_T("last_traded_qty")),oi=ExtractJsonFloatValue(message,_T("oi")),
+\t\tbid=ExtractJsonFloatValue(message,_T("bid_price")),ask=ExtractJsonFloatValue(message,_T("ask_price"));
+\tCString raw=ExtractJsonRawValue(message,_T("last_traded_time"));if(raw.IsEmpty())raw=ExtractJsonRawValue(message,_T("exch_feed_time"));
+\ttime_t tradeTs=0;if(!FyersParseTimestampField(raw,tradeTs)||tradeTs<=0)tradeTs=time(NULL);if(ltp<=0)return;
+\tFyersSymbolState* state=FyersFindStateByFyersSymbol(ticker);if(!state)return;CString ami=state->amiTicker;
+\ttime_t barStart=(tradeTs/FYERS_PERIOD_5SEC)*FYERS_PERIOD_5SEC,gapStart=0,gapEnd=0;BOOL isTrade=TRUE;
+\tEnterCriticalSection(&g_fyersStateCS);
+\tBOOL gap=FALSE;if(state->currentBarStarted&&barStart>state->currentBarStart+FYERS_PERIOD_5SEC){gap=TRUE;gapStart=state->currentBarStart+FYERS_PERIOD_5SEC;gapEnd=barStart-FYERS_PERIOD_5SEC;}
+\tfloat vd=0.0f;if(total>0.0f){if(state->haveTotalVolume&&total>=state->lastTotalVolume)vd=total-state->lastTotalVolume;else if(!state->haveTotalVolume)vd=qty;state->lastTotalVolume=total;state->haveTotalVolume=TRUE;}else vd=qty;
+\tif(gap)vd=qty;BOOL dup=(state->lastTradeTs==tradeTs&&ltp==state->currentBar.Price&&fabs((double)vd)<0.0001);if(dup)isTrade=FALSE;
+\tif(!state->currentBarStarted||barStart!=state->currentBarStart){if(state->currentBarStarted&&state->currentBarStart>0){FyersUpsertQuotation(state->fiveSecBars,state->currentBar,FYERS_MAX_5S_BARS);state->lastCompleted5s=state->currentBarStart;}
+\t\tmemset(&state->currentBar,0,sizeof(state->currentBar));ConvertUnixToPackedDate(barStart,&state->currentBar.DateTime);state->currentBar.Open=ltp;state->currentBar.High=ltp;state->currentBar.Low=ltp;state->currentBar.Price=ltp;state->currentBar.Volume=max(0.0f,vd);state->currentBar.OpenInterest=oi;state->currentBarStart=barStart;state->currentBarStarted=TRUE;
+\t}else{if(ltp>state->currentBar.High)state->currentBar.High=ltp;if(ltp<state->currentBar.Low||state->currentBar.Low==0.0f)state->currentBar.Low=ltp;state->currentBar.Price=ltp;state->currentBar.Volume+=max(0.0f,vd);if(oi>0)state->currentBar.OpenInterest=oi;}
+\tstate->lastTradeTs=tradeTs;state->lastLocalTickTick=(DWORD)GetTickCount64();LeaveCriticalSection(&g_fyersStateCS);
+\tFyersUpdateRecentInfo(ami,ltp,open,high,low,prev,total,oi,bid,ask,qty,isTrade);
+\tif(gapStart>0&&gapEnd>=gapStart){FyersHistoryJob job;job.ticker=ami;job.periodicity=FYERS_PERIOD_5SEC;job.startTs=gapStart;job.endTs=gapEnd;job.initialLoad=FALSE;BOOL q=FALSE;
+\t\tEnterCriticalSection(&g_fyersStateCS);if(!state->fiveSecFetchInProgress){state->fiveSecFetchInProgress=TRUE;q=TRUE;}LeaveCriticalSection(&g_fyersStateCS);
+\t\tif(q&&g_fyersHistoryQueueCSInitialized){EnterCriticalSection(&g_fyersHistoryQueueCS);g_fyersHistoryQueue.AddTail(job);LeaveCriticalSection(&g_fyersHistoryQueueCS);if(g_hFyersHistoryEvent)SetEvent(g_hFyersHistoryEvent);}
+\t}
+\tif(g_hAmiBrokerWnd)PostMessage(g_hAmiBrokerWnd,WM_USER_STREAMING_UPDATE,0,0);
 }
 
-static void FyersProcessWebSocketPayload(const CStringA& payloadA)
+static void FyersUpdateHsmField(FyersSymbolState* state,BOOL index,int idx,int32_t value,BOOL& relevant)
 {
-	if (payloadA.IsEmpty())
-		return;
-
-	CString payload(payloadA);
-
-	// A close or subscription ACK has no market-data symbol + ltp pair.
-	if (payload.Find(_T("\"symbol\"")) < 0)
-		return;
-
-	FyersHandleMarketMessage(payload);
+\tif(!state||value==(int32_t)0x80000000)return;FyersHsmSnapshot& s=state->snapshot;
+\tif(!index){switch(idx){case 0:s.ltp=(float)(value/s.priceScale);relevant=TRUE;break;case 1:s.totalVol=(float)value;relevant=TRUE;break;case 2:s.lastTradeTime=(time_t)value;relevant=TRUE;break;case 3:s.exchangeFeedTime=(time_t)value;break;case 6:s.bid=(float)(value/s.priceScale);relevant=TRUE;break;case 7:s.ask=(float)(value/s.priceScale);relevant=TRUE;break;case 8:s.tradeQty=(float)value;relevant=TRUE;break;case 12:s.oi=(float)value;relevant=TRUE;break;case 13:s.low=(float)(value/s.priceScale);relevant=TRUE;break;case 14:s.high=(float)(value/s.priceScale);relevant=TRUE;break;case 19:s.open=(float)(value/s.priceScale);relevant=TRUE;break;case 20:s.prevClose=(float)(value/s.priceScale);relevant=TRUE;break;default:break;}}
+\telse{switch(idx){case 0:s.ltp=(float)(value/s.priceScale);relevant=TRUE;break;case 1:s.prevClose=(float)(value/s.priceScale);relevant=TRUE;break;case 2:s.exchangeFeedTime=(time_t)value;relevant=TRUE;break;case 3:s.high=(float)(value/s.priceScale);relevant=TRUE;break;case 4:s.low=(float)(value/s.priceScale);relevant=TRUE;break;case 5:s.open=(float)(value/s.priceScale);relevant=TRUE;break;default:break;}}
+\tif(s.ltp>0)s.valid=TRUE;
 }
+static CString FyersSnapshotToJson(FyersSymbolState* state)
+{
+\tFyersHsmSnapshot s;CString sym;EnterCriticalSection(&g_fyersStateCS);s=state->snapshot;sym=state->fyersSymbol;LeaveCriticalSection(&g_fyersStateCS);
+\tif(!s.valid||s.ltp<=0||sym.IsEmpty())return CString();CStringA a(sym);CStringA j;j.Format("{\"symbol\":\"%s\",\"ltp\":%.8f,\"vol_traded_today\":%.0f,\"last_traded_time\":%lld,\"exch_feed_time\":%lld,\"bid_price\":%.8f,\"ask_price\":%.8f,\"last_traded_qty\":%.0f,\"OI\":%.0f,\"oi\":%.0f,\"low_price\":%.8f,\"high_price\":%.8f,\"open_price\":%.8f,\"prev_close_price\":%.8f}",
+\t\t(LPCSTR)a,s.ltp,s.totalVol,(long long)s.lastTradeTime,(long long)s.exchangeFeedTime,s.bid,s.ask,s.tradeQty,s.oi,s.oi,s.low,s.high,s.open,s.prevClose);
+\treturn CString(j);
+}
+static void FyersEmitHsmSnapshot(FyersSymbolState* state){CString j=FyersSnapshotToJson(state);if(!j.IsEmpty())FyersHandleMarketMessage(j);}
+
+static void FyersParseHsmDataFeed(const BYTE* data,size_t len)
+{
+\tif(!data||len<9)return;BOOL ok=TRUE;size_t off=0;FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;BYTE mt=data[off++];if(mt==6){if(off+4>len)return;off+=4;}
+\tuint16_t count=FyersReadBE16(data,len,off,ok);if(!ok)return;
+\tfor(uint16_t n=0;n<count&&off<len;n++){BYTE t=data[off++];
+\t\tif(t==83){uint16_t topicId=FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;CStringA topicA;if(!FyersReadHsmString(data,len,off,topicA))return;CString topic(topicA);
+\t\t\tBOOL index=topic.Left(3).CompareNoCase(_T("if|"))==0,scrip=topic.Left(3).CompareNoCase(_T("sf|"))==0;if(!index&&!scrip)return;FyersSymbolState* state=FyersFindStateByHsmToken(topic);if(!state)return;
+\t\t\tEnterCriticalSection(&g_fyersStateCS);state->topicId=(WORD)topicId;state->snapshot=FyersHsmSnapshot();LeaveCriticalSection(&g_fyersStateCS);
+\t\t\tif(off>=len)return;BYTE fc=data[off++];
+\t\t\tfor(BYTE i=0;i<fc;i++){int32_t v=FyersReadBEI32(data,len,off,ok);if(!ok)return;EnterCriticalSection(&g_fyersStateCS);FyersHsmSnapshot& s=state->snapshot;
+\t\t\t\tif(index){switch(i){case 0:s.ltp=(float)v;break;case 1:s.prevClose=(float)v;break;case 2:s.exchangeFeedTime=(time_t)v;break;case 3:s.high=(float)v;break;case 4:s.low=(float)v;break;case 5:s.open=(float)v;break;default:break;}}
+\t\t\t\telse{switch(i){case 0:s.ltp=(float)v;break;case 1:s.totalVol=(float)v;break;case 2:s.lastTradeTime=(time_t)v;break;case 3:s.exchangeFeedTime=(time_t)v;break;case 6:s.bid=(float)v;break;case 7:s.ask=(float)v;break;case 8:s.tradeQty=(float)v;break;case 12:s.oi=(float)v;break;case 13:s.low=(float)v;break;case 14:s.high=(float)v;break;case 19:s.open=(float)v;break;case 20:s.prevClose=(float)v;break;default:break;}}\n\t\t\t\tLeaveCriticalSection(&g_fyersStateCS);}
+\t\t\tif(off+2>len)return;off+=2;uint16_t mult=FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;BYTE prec=data[off++];CStringA tmp;if(!FyersReadHsmString(data,len,off,tmp))return;if(!FyersReadHsmString(data,len,off,tmp))return;if(!FyersReadHsmString(data,len,off,tmp))return;
+\t\t\tdouble scale=pow(10.0,(double)prec)*(double)mult;if(scale<=0)scale=100.0;EnterCriticalSection(&g_fyersStateCS);FyersHsmSnapshot& s=state->snapshot;s.priceScale=scale;
+\t\t\ts.ltp=(float)(s.ltp/scale);s.prevClose=(float)(s.prevClose/scale);s.high=(float)(s.high/scale);s.low=(float)(s.low/scale);s.open=(float)(s.open/scale);if(!index){s.bid=(float)(s.bid/scale);s.ask=(float)(s.ask/scale);}
+\t\t\ts.valid=(s.ltp>0);LeaveCriticalSection(&g_fyersStateCS);FyersEmitHsmSnapshot(state);
+\t\t}
+\t\telse if(t==85){uint16_t topicId=FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;BYTE fc=data[off++];FyersSymbolState* state=FyersFindStateByTopicId((WORD)topicId);
+\t\t\tif(!state){size_t skip=(size_t)fc*4;if(off+skip>len)return;off+=skip;continue;}CString topic;EnterCriticalSection(&g_fyersStateCS);topic=state->hsmToken;LeaveCriticalSection(&g_fyersStateCS);BOOL index=topic.Left(3).CompareNoCase(_T("if|"))==0,relevant=FALSE;
+\t\t\tfor(BYTE i=0;i<fc;i++){int32_t v=FyersReadBEI32(data,len,off,ok);if(!ok)return;EnterCriticalSection(&g_fyersStateCS);FyersUpdateHsmField(state,index,i,v,relevant);LeaveCriticalSection(&g_fyersStateCS);}if(relevant)FyersEmitHsmSnapshot(state);
+\t\t}
+\t\telse if(t==76){uint16_t topicId=FyersReadBE16(data,len,off,ok);int32_t v=FyersReadBEI32(data,len,off,ok);if(!ok)return;FyersSymbolState* state=FyersFindStateByTopicId((WORD)topicId);if(state){EnterCriticalSection(&g_fyersStateCS);state->snapshot.ltp=(float)(v/state->snapshot.priceScale);state->snapshot.valid=TRUE;LeaveCriticalSection(&g_fyersStateCS);FyersEmitHsmSnapshot(state);}}
+\t\telse return;
+\t}
+}
+static void FyersProcessWebSocketPayload(const BYTE* data,size_t len){if(data&&len)FyersParseHsmDataFeed(data,len);}
 
 static void FyersCloseWebSocketOnOwnerThread(void)
 {
-	HINTERNET ws = NULL;
-	HINTERNET conn = NULL;
-	HINTERNET session = NULL;
+\tHINTERNET ws=NULL,conn=NULL,session=NULL;EnterCriticalSection(&g_fyersWsIoCS);EnterCriticalSection(&g_fyersWsCS);
+\tws=g_hFyersWebSocket;conn=g_hFyersWsConnection;session=g_hFyersWsSession;g_hFyersWebSocket=NULL;g_hFyersWsConnection=NULL;g_hFyersWsSession=NULL;LeaveCriticalSection(&g_fyersWsCS);
+\tif(ws)WinHttpWebSocketClose(ws,WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,NULL,0);LeaveCriticalSection(&g_fyersWsIoCS);
+\tif(ws)WinHttpCloseHandle(ws);if(conn)WinHttpCloseHandle(conn);if(session)WinHttpCloseHandle(session);
+\tif(g_hFyersConnectedEvent)ResetEvent(g_hFyersConnectedEvent);if(g_hFyersAuthenticatedEvent)ResetEvent(g_hFyersAuthenticatedEvent);
+}
 
-	EnterCriticalSection(&g_fyersWsIoCS);
-	EnterCriticalSection(&g_fyersWsCS);
-	ws = g_hFyersWebSocket;
-	conn = g_hFyersWsConnection;
-	session = g_hFyersWsSession;
-	g_hFyersWebSocket = NULL;
-	g_hFyersWsConnection = NULL;
-	g_hFyersWsSession = NULL;
-	LeaveCriticalSection(&g_fyersWsCS);
-
-	if (ws)
-		WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
-	LeaveCriticalSection(&g_fyersWsIoCS);
-
-	if (ws) WinHttpCloseHandle(ws);
-	if (conn) WinHttpCloseHandle(conn);
-	if (session) WinHttpCloseHandle(session);
+static BOOL FyersBuildAuthMessage(std::vector<BYTE>& msg,const CString& hsmKey)
+{
+\tCStringA hsm(hsmKey);const char* source="CSDK-3.1.8";size_t hl=(size_t)hsm.GetLength(),sl=strlen(source),total=18+hl+sl;if(total>65535)return FALSE;
+\tmsg.assign(total,0);uint16_t dl=(uint16_t)(total-2);msg[0]=(BYTE)(dl>>8);msg[1]=(BYTE)dl;msg[2]=1;msg[3]=4;msg[4]=1;msg[5]=(BYTE)(hl>>8);msg[6]=(BYTE)hl;memcpy(msg.data()+7,hsm.GetString(),hl);
+\tsize_t o=7+hl;msg[o++]=2;msg[o++]=0;msg[o++]=1;msg[o++]='P';msg[o++]=3;msg[o++]=0;msg[o++]=1;msg[o++]=1;msg[o++]=4;msg[o++]=(BYTE)(sl>>8);msg[o++]=(BYTE)sl;memcpy(msg.data()+o,source,sl);return TRUE;
+}
+static BOOL FyersBuildModeMessage(std::vector<BYTE>& msg)
+{
+\tmsg.assign(19,0);msg[2]=12;msg[3]=2;msg[4]=1;msg[5]=0;msg[6]=8;uint64_t bits=(uint64_t)1<<11;for(int i=0;i<8;i++)msg[7+i]=(BYTE)((bits>>(56-i*8))&0xFF);
+\tmsg[15]=2;msg[16]=0;msg[17]=1;msg[18]=70;uint16_t dl=(uint16_t)(msg.size()-2);msg[0]=(BYTE)(dl>>8);msg[1]=(BYTE)dl;return TRUE;
 }
 
 static HINTERNET FyersConnectWebSocket(void)
 {
-    HINTERNET session=NULL,conn=NULL,request=NULL,ws=NULL;
-    DWORD status=0,size=sizeof(status);
-    CStringW appIdW(FyersNormalizeAppId(g_fyersAppId)),tokenW(g_fyersAccessToken),auth;
-    session=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
-    if(!session) goto fail;
-    WinHttpSetTimeouts(session,5000,5000,FYERS_WS_RECEIVE_TIMEOUT_MS,FYERS_WS_RECEIVE_TIMEOUT_MS);
-    conn=WinHttpConnect(session,FYERS_DIRECT_WS_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0); if(!conn) goto fail;
-    request=WinHttpOpenRequest(conn,L"GET",FYERS_DIRECT_WS_PATH_W,NULL,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE); if(!request) goto fail;
-    if(!WinHttpSetOption(request,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,NULL,0)) goto fail;
-    auth.Format(L"Authorization: %s:%s\r\n",(LPCWSTR)appIdW,(LPCWSTR)tokenW);
-    if(!WinHttpAddRequestHeaders(request,(LPCWSTR)auth,(DWORD)-1L,WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE)) goto fail;
-    if(!WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)) goto fail;
-    if(!WinHttpReceiveResponse(request,NULL)) goto fail;
-    if(!WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&size,WINHTTP_NO_HEADER_INDEX)) goto fail;
-    if(status!=101) goto fail;
-    ws=WinHttpWebSocketCompleteUpgrade(request,0); WinHttpCloseHandle(request); request=NULL; if(!ws) goto fail;
-    EnterCriticalSection(&g_fyersWsCS); g_hFyersWebSocket=ws; g_hFyersWsConnection=conn; g_hFyersWsSession=session; LeaveCriticalSection(&g_fyersWsCS);
-    conn=NULL; session=NULL; SetEvent(g_hFyersConnectedEvent); return ws;
+\tHINTERNET session=NULL,conn=NULL,request=NULL,ws=NULL;CString hsm;g_fyersLastError.Empty();if(!FyersExtractHsmKeyFromAccessToken(hsm))return NULL;
+\tsession=WinHttpOpen(L"FYERS Direct AmiBroker Data Plugin/1.0",WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);if(!session){FyersSetWinHttpError(_T("WinHttpOpen(WebSocket)"),GetLastError());goto fail;}
+\tWinHttpSetTimeouts(session,5000,5000,FYERS_WS_RECEIVE_TIMEOUT_MS,FYERS_WS_RECEIVE_TIMEOUT_MS);
+\tconn=WinHttpConnect(session,FYERS_DIRECT_WS_HOST_W,INTERNET_DEFAULT_HTTPS_PORT,0);if(!conn){FyersSetWinHttpError(_T("WinHttpConnect(socket.fyers.in)"),GetLastError());goto fail;}
+\trequest=WinHttpOpenRequest(conn,L"GET",FYERS_DIRECT_WS_PATH_W,NULL,WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,WINHTTP_FLAG_SECURE);if(!request){FyersSetWinHttpError(_T("WinHttpOpenRequest(WebSocket)"),GetLastError());goto fail;}
+\tif(!WinHttpSetOption(request,WINHTTP_OPTION_UPGRADE_TO_WEB_SOCKET,NULL,0)){FyersSetWinHttpError(_T("WinHttpSetOption(UPGRADE_TO_WEB_SOCKET)"),GetLastError());goto fail;}
+\t{const wchar_t hdrs[]=L"Origin: https://fyers.in\r\n";if(!WinHttpAddRequestHeaders(request,hdrs,(DWORD)-1L,WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE)){FyersSetWinHttpError(_T("WinHttpAddRequestHeaders(WebSocket)"),GetLastError());goto fail;}}
+\tif(!WinHttpSendRequest(request,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)){FyersSetWinHttpError(_T("WinHttpSendRequest(WebSocket)"),GetLastError());goto fail;}
+\tif(!WinHttpReceiveResponse(request,NULL)){FyersSetWinHttpError(_T("WinHttpReceiveResponse(WebSocket)"),GetLastError());goto fail;}
+\t{DWORD status=0,size=sizeof(status);if(!WinHttpQueryHeaders(request,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,WINHTTP_HEADER_NAME_BY_INDEX,&status,&size,WINHTTP_NO_HEADER_INDEX)){FyersSetWinHttpError(_T("WinHttpQueryHeaders(WebSocket)"),GetLastError());goto fail;}if(status!=101){CString m;m.Format(_T("FYERS WebSocket upgrade failed: HTTP %lu (expected 101)."),(unsigned long)status);FyersSetLastError(m);goto fail;}}
+\tws=WinHttpWebSocketCompleteUpgrade(request,0);if(!ws){FyersSetWinHttpError(_T("WinHttpWebSocketCompleteUpgrade"),GetLastError());goto fail;}WinHttpCloseHandle(request);request=NULL;
+\tEnterCriticalSection(&g_fyersWsCS);g_hFyersWebSocket=ws;g_hFyersWsConnection=conn;g_hFyersWsSession=session;LeaveCriticalSection(&g_fyersWsCS);conn=NULL;session=NULL;
+\tif(g_hFyersConnectedEvent)SetEvent(g_hFyersConnectedEvent);if(g_hFyersAuthenticatedEvent)ResetEvent(g_hFyersAuthenticatedEvent);
+\tstd::vector<BYTE> a,m;if(!FyersBuildAuthMessage(a,hsm)||!FyersBuildModeMessage(m)||!FyersSendWebSocketBinary(a)||!FyersSendWebSocketBinary(m)){FyersSetLastError(_T("FYERS WebSocket: failed to send HSM authentication/mode message."));}
+\treturn ws;
 fail:
-    if(request) WinHttpCloseHandle(request); if(conn) WinHttpCloseHandle(conn); if(session) WinHttpCloseHandle(session);
-    return NULL;
+\tif(request)WinHttpCloseHandle(request);if(conn)WinHttpCloseHandle(conn);if(session)WinHttpCloseHandle(session);return NULL;
+}
+
+static void FyersProcessWebSocketControlMessage(const BYTE* data,size_t len)
+{
+\tif(!data||len<3)return;BYTE type=data[2];
+\tif(type==1){if(len<7)return;size_t off=4;BOOL ok=TRUE;off++;uint16_t fl=FyersReadBE16(data,len,off,ok);if(!ok||off+fl>len)return;CStringA r((LPCSTR)(data+off),(int)fl);
+\t\tif(r=="K"){g_nStatus=STATUS_CONNECTED;if(g_hFyersAuthenticatedEvent)SetEvent(g_hFyersAuthenticatedEvent);FyersSetLastError(_T("FYERS WebSocket: HSM authentication succeeded."));FyersSubscribeAll();if(g_hAmiBrokerWnd)PostMessage(g_hAmiBrokerWnd,WM_USER_STREAMING_UPDATE,0,0);}
+\t\telse{CString m;m.Format(_T("FYERS WebSocket: HSM authentication rejected ('%s')."),(LPCTSTR)CString(r));FyersSetLastError(m);}return;}
+\tif(type==4){BOOL ok=TRUE;size_t off=5;uint16_t fl=FyersReadBE16(data,len,off,ok);if(!ok||off+fl>len)return;CStringA r((LPCSTR)(data+off),(int)fl);if(r=="K")FyersSetLastError(_T("FYERS WebSocket: subscription accepted."));else{CString m;m.Format(_T("FYERS WebSocket: subscription rejected ('%s')."),(LPCTSTR)CString(r));FyersSetLastError(m);}return;}
 }
 
 static UINT __cdecl FyersWebSocketThreadProc(LPVOID)
 {
-	AFX_MANAGE_STATE(AfxGetStaticModuleState());
-
-	CStringA fragmentBuffer;
-	ULONGLONG lastHeartbeat = GetTickCount64();
-
-	while (InterlockedCompareExchange(&g_bFyersWsShouldStop, 0, 0) == 0)
-	{
-		if (InterlockedExchange(&g_bFyersForceReconnect, 0) != 0)
-		{
-			FyersCloseWebSocketOnOwnerThread();
-			ResetEvent(g_hFyersConnectedEvent);
-		}
-
-		HINTERNET ws = NULL;
-		EnterCriticalSection(&g_fyersWsCS);
-		ws = g_hFyersWebSocket;
-		LeaveCriticalSection(&g_fyersWsCS);
-
-		if (!ws)
-		{
-			if (!FyersCredentialsReady())
-			{
-				g_nStatus = STATUS_WAIT;
-				Sleep(FYERS_RECONNECT_DELAY_MS);
-				continue;
-			}
-
-			g_nStatus = STATUS_WAIT;
-			ws = FyersConnectWebSocket();
-			if (!ws)
-			{
-				g_nStatus = STATUS_DISCONNECTED;
-				Sleep(FYERS_RECONNECT_DELAY_MS);
-				continue;
-			}
-
-			g_nStatus = STATUS_CONNECTED;
-			FyersSubscribeAll();
-
-			if (g_hAmiBrokerWnd)
-				PostMessage(g_hAmiBrokerWnd, WM_USER_STREAMING_UPDATE, 0, 0);
-		}
-
-		BYTE buffer[65536];
-		DWORD received = 0;
-		WINHTTP_WEB_SOCKET_BUFFER_TYPE bufferType = WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE;
-
-		DWORD rc = WinHttpWebSocketReceive(ws, buffer, sizeof(buffer) - 1,
-		                                   &received, &bufferType);
-
-		if (rc == NO_ERROR)
-		{
-			if (bufferType == WINHTTP_WEB_SOCKET_UTF8_FRAGMENT_BUFFER_TYPE)
-			{
-				fragmentBuffer.Append((LPCSTR)buffer, (int)received);
-				continue;
-			}
-			if (bufferType == WINHTTP_WEB_SOCKET_UTF8_MESSAGE_BUFFER_TYPE)
-			{
-				if (!fragmentBuffer.IsEmpty())
-				{
-					fragmentBuffer.Append((LPCSTR)buffer, (int)received);
-					FyersProcessWebSocketPayload(fragmentBuffer);
-					fragmentBuffer.Empty();
-				}
-				else
-				{
-					CStringA msg((LPCSTR)buffer, (int)received);
-					FyersProcessWebSocketPayload(msg);
-				}
-				lastHeartbeat = GetTickCount64();
-				continue;
-			}
-
-			if (bufferType == WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE)
-			{
-				FyersCloseWebSocketOnOwnerThread();
-				ResetEvent(g_hFyersConnectedEvent);
-				g_nStatus = STATUS_DISCONNECTED;
-				continue;
-			}
-		}
-		else if (rc == ERROR_WINHTTP_TIMEOUT)
-		{
-			ULONGLONG now = GetTickCount64();
-			if ((now - lastHeartbeat) >= (ULONGLONG)FYERS_WS_HEARTBEAT_SEC * 1000ULL)
-			{
-				CStringA ping("ping");
-				FyersSendWebSocketUtf8(ping);
-				lastHeartbeat = now;
-			}
-			continue;
-		}
-		else
-		{
-			FyersCloseWebSocketOnOwnerThread();
-			ResetEvent(g_hFyersConnectedEvent);
-			g_nStatus = STATUS_DISCONNECTED;
-		}
-	}
-
-	FyersCloseWebSocketOnOwnerThread();
-	ResetEvent(g_hFyersConnectedEvent);
-	g_nStatus = STATUS_SHUTDOWN;
-	return 0;
+\tAFX_MANAGE_STATE(AfxGetStaticModuleState());std::vector<BYTE> fragment;ULONGLONG lastHeartbeat=GetTickCount64();
+\twhile(InterlockedCompareExchange(&g_bFyersWsShouldStop,0,0)==0)
+\t{
+\t\tif(InterlockedExchange(&g_bFyersForceReconnect,0)!=0){FyersCloseWebSocketOnOwnerThread();fragment.clear();}
+\t\tHINTERNET ws=NULL;EnterCriticalSection(&g_fyersWsCS);ws=g_hFyersWebSocket;LeaveCriticalSection(&g_fyersWsCS);
+\t\tif(!ws){if(!FyersCredentialsReady()){g_nStatus=STATUS_WAIT;Sleep(FYERS_RECONNECT_DELAY_MS);continue;}g_nStatus=STATUS_WAIT;ws=FyersConnectWebSocket();if(!ws){g_nStatus=STATUS_DISCONNECTED;Sleep(FYERS_RECONNECT_DELAY_MS);continue;}lastHeartbeat=GetTickCount64();}
+\t\tBYTE buffer[65536];DWORD received=0;WINHTTP_WEB_SOCKET_BUFFER_TYPE bt=WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE;DWORD rc=WinHttpWebSocketReceive(ws,buffer,sizeof(buffer),&received,&bt);
+\t\tif(rc==NO_ERROR)
+\t\t{
+\t\t\tif(bt==WINHTTP_WEB_SOCKET_BINARY_FRAGMENT_BUFFER_TYPE){fragment.insert(fragment.end(),buffer,buffer+received);continue;}
+\t\t\tif(bt==WINHTTP_WEB_SOCKET_BINARY_MESSAGE_BUFFER_TYPE){const BYTE* p=buffer;size_t n=received;if(!fragment.empty()){fragment.insert(fragment.end(),buffer,buffer+received);p=fragment.data();n=fragment.size();}
+\t\t\t\tif(n>=3&&p[2]==6)FyersProcessWebSocketPayload(p,n);else FyersProcessWebSocketControlMessage(p,n);fragment.clear();lastHeartbeat=GetTickCount64();continue;}
+\t\t\tif(bt==WINHTTP_WEB_SOCKET_CLOSE_BUFFER_TYPE){FyersCloseWebSocketOnOwnerThread();g_nStatus=STATUS_DISCONNECTED;continue;}
+\t\t}
+\t\telse if(rc==ERROR_WINHTTP_TIMEOUT){ULONGLONG now=GetTickCount64();if(now-lastHeartbeat>=(ULONGLONG)FYERS_WS_HEARTBEAT_SEC*1000ULL){BYTE ping[]={0,1,11};FyersSendWebSocketBinary(ping,(DWORD)sizeof(ping));lastHeartbeat=now;}continue;}
+\t\telse{FyersSetWinHttpError(_T("WinHttpWebSocketReceive"),rc);FyersCloseWebSocketOnOwnerThread();g_nStatus=STATUS_DISCONNECTED;}
+\t}
+\tFyersCloseWebSocketOnOwnerThread();g_nStatus=STATUS_SHUTDOWN;return 0;
 }
 
 static void FyersQueueHistoryJob(const CString& ticker,
@@ -2006,12 +2066,15 @@ BOOL FyersDirectInit(void)
 
 	if (!g_hFyersConnectedEvent)
 		g_hFyersConnectedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+	if (!g_hFyersAuthenticatedEvent)
+		g_hFyersAuthenticatedEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
 	if (!FyersLoadSettings())
 		FyersLoadLegacyAccessTokenFile();
 
 	if (!g_fyersAppId.IsEmpty())
 		g_fyersAppId = FyersNormalizeAppId(g_fyersAppId);
+	g_fyersAccessToken = FyersNormalizeAccessToken(g_fyersAccessToken);
 	g_oServer = g_fyersAppId;
 	g_oApiKey = g_fyersAccessToken;
 
@@ -2070,6 +2133,11 @@ void FyersDirectRelease(void)
 		g_pFyersHistoryThread = NULL;
 	}
 
+	if (g_hFyersAuthenticatedEvent)
+	{
+		CloseHandle(g_hFyersAuthenticatedEvent);
+		g_hFyersAuthenticatedEvent = NULL;
+	}
 	if (g_hFyersConnectedEvent)
 	{
 		CloseHandle(g_hFyersConnectedEvent);
