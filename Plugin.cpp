@@ -291,9 +291,12 @@ int CompareQuotations(const void* a, const void* b);
 //////////////////////////////////////////////////////////
 
 #include "OpenAlgoUtilities.inc"
+#ifdef FYERS_DIRECT_BUILD
 #include "FyersDirect.inc"
+#else
 #include "OpenAlgoHistory.inc"
 #include "OpenAlgoAmiBroker.inc"
 #include "OpenAlgoWebSocket.inc"
 #include "OpenAlgoRealtimeBars.inc"
 #include "OpenAlgoWorkers.inc"
+#endif
