@@ -31,6 +31,7 @@ extern BOOL g_bDirectFyersMode;
 extern CString g_fyersAppId;
 extern CString g_fyersAccessToken;
 extern int g_fyersGapCheckIntervalSec;
+extern CString g_fyersLastError;
 
 // Legacy backfill tracking
 extern int g_nBackfillDays;
