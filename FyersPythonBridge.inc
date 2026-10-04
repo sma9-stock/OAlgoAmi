@@ -1140,7 +1140,7 @@ BOOL FyersBridgeCredentialsReady()
     return !g_fyersAppId.IsEmpty() && BridgeFileExists(g_fyersTokenFilePath);
 }
 
-BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
+BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath, CString bridgeScriptPath)
 {
     appId.Trim();
     tokenFilePath.Trim();
@@ -1313,7 +1313,7 @@ BOOL FyersDirectInit()
 
     // Read branch-local config.
     g_fyersTokenFilePath = BridgeDefaultTokenPath();
-    g_fyersBridgeScriptPath = BridgeDefaultScriptPath();
+    g_fyersBridgeScriptPath = bridgeScriptPath.IsEmpty() ? BridgeDefaultScriptPath() : BridgeResolvePath(bridgeScriptPath);
 
     CString cfg = BridgeModuleDir() + _T("\\FyersBridge.config");
     if (BridgeFileExists(cfg))
