@@ -160,10 +160,56 @@ static CString FyersNormalizeAppId(CString appId)
 	if (appId.IsEmpty())
 		return appId;
 
-	if (appId.Right(4).CompareNoCase(_T("-100")) != 0)
+	// FYERS has used both -100 data-app IDs and -200 IDs for newer apps.
+	// Never rewrite an explicit suffix. Only add the legacy -100 suffix when
+	// the user supplied a bare app ID without any suffix.
+	CString suffix = appId.Right(4);
+	if (suffix.CompareNoCase(_T("-100")) != 0 &&
+		suffix.CompareNoCase(_T("-200")) != 0 &&
+		appId.Find(_T('-')) < 0)
+	{
 		appId += _T("-100");
+	}
 
 	return appId;
+}
+
+static void FyersResetStatesForDatabase(void)
+{
+	if (!g_fyersStateCSInitialized)
+		return;
+
+	EnterCriticalSection(&g_fyersStateCS);
+
+	POSITION pos = g_fyersStates.GetStartPosition();
+	while (pos != NULL)
+	{
+		CString key;
+		FyersSymbolState* state = NULL;
+		g_fyersStates.GetNextAssoc(pos, key, state);
+		if (!state)
+			continue;
+
+		state->fiveSecBars.RemoveAll();
+		state->dailyBars.RemoveAll();
+		memset(&state->currentBar, 0, sizeof(state->currentBar));
+		state->currentBarStarted = FALSE;
+		state->currentBarStart = 0;
+		state->lastCompleted5s = 0;
+		state->lastTradeTs = 0;
+		state->lastTotalVolume = 0.0f;
+		state->haveTotalVolume = FALSE;
+		state->lastFiveSecFetchTick = 0;
+		state->lastDailyFetchTick = 0;
+		state->fiveSecFetchInProgress = FALSE;
+		state->dailyFetchInProgress = FALSE;
+		state->seededFromAmi = FALSE;
+		state->startupGapChecked = FALSE;
+		state->subscribed = FALSE;
+		state->lastLocalTickTick = 0;
+	}
+
+	LeaveCriticalSection(&g_fyersStateCS);
 }
 
 static CString FyersNormalizeSymbol(LPCTSTR pszTicker)
@@ -2086,15 +2132,18 @@ BOOL FyersDirectNotify(struct PluginNotification* pn)
 		g_hAmiBrokerWnd = pn->hMainWnd;
 		g_nStatus = FyersCredentialsReady() ? STATUS_WAIT : STATUS_DISCONNECTED;
 
-		// Any old symbol state from a previous database can safely be discarded;
-		// AmiBroker will ask us for the new database's symbols.
-		FyersClearStates();
+		// Keep state objects alive while the background WS/history threads run.
+		// AmiBroker may switch databases while those threads are still inside
+		// a state lookup; deleting objects here would create a use-after-free.
+		// Reset the objects instead. Release() performs the final destruction
+		// only after both worker threads have stopped.
+		FyersResetStatesForDatabase();
 	}
 	
 	if (pn->nReason & REASON_DATABASE_UNLOADED)
 	{
 		g_hAmiBrokerWnd = NULL;
-		FyersClearStates();
+		FyersResetStatesForDatabase();
 	}
 
 	if (pn->nReason & REASON_SETTINGS_CHANGE)
