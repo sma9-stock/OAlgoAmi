@@ -56,7 +56,7 @@ int g_nStatus = STATUS_WAIT;
 ////////////////////////////////////////////////////////////
 // FYERS direct configuration
 //
-// App ID is normalized to the <APP_ID>-100 form internally.
+// App ID is preserved exactly as issued by FYERS (for example -100 or -200).
 // The Access Token is held only in memory at runtime and stored encrypted
 // with Windows DPAPI by FyersDirect.inc. No token is present in source.
 ////////////////////////////////////////////////////////////
