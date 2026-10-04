@@ -179,6 +179,7 @@ class WebSocketProbe:
         self.done = threading.Event()
         self.ws = None
         self._keep_running_started = False
+        self._shutdown_requested = False
 
     def on_connect(self) -> None:
         print("\nWS: authenticated/connected")
@@ -219,7 +220,11 @@ class WebSocketProbe:
 
     def on_close(self, message: Any) -> None:
         print("WS CLOSE:", message)
-        self.done.set()
+        # A transient SDK reconnect must not make the smoke test fail early.
+        # run() marks _shutdown_requested only when it intentionally ends the
+        # test socket.
+        if self._shutdown_requested:
+            self.done.set()
 
     def run(self, seconds: int) -> bool:
         auth = f"{self.app_id}:{self.token}"
@@ -265,6 +270,7 @@ class WebSocketProbe:
         while time.time() < deadline and not self.done.is_set():
             time.sleep(0.2)
 
+        self._shutdown_requested = True
         try:
             self.ws.disconnect()
         except Exception:
