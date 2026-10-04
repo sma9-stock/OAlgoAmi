@@ -63,6 +63,7 @@ int g_nStatus = STATUS_WAIT;
 BOOL g_bDirectFyersMode = TRUE;
 CString g_fyersAppId = _T("");
 CString g_fyersAccessToken = _T("");
+CString g_fyersLastError = _T("");
 int g_fyersGapCheckIntervalSec = 5;
 
 // Backfill request tracking
