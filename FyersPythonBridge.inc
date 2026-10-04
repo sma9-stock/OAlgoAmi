@@ -92,6 +92,7 @@ static BOOL g_bridgeStopping = FALSE;
 
 static WSADATA g_bridgeWsaData;
 static BOOL g_bridgeWsaInit = FALSE;
+static CString g_bridgeScriptPath;
 
 static HANDLE g_bridgeTestEvent = NULL;
 static int g_bridgeTestKind = 0;
@@ -865,7 +866,7 @@ static BOOL BridgeLaunchPython()
         return FALSE;
     }
 
-    if (!BridgeFileExists(g_fyersTokenPath))
+    if (!BridgeFileExists(g_fyersTokenFilePath))
     {
         BridgeStatus(_T("access_token.txt is missing. Run atok.py first."));
         return FALSE;
@@ -920,7 +921,7 @@ static BOOL BridgeLaunchPython()
 
     CStringW scriptArg = quoteArg(g_bridgeScriptPath);
     CStringW appArg = quoteArg(g_fyersAppId);
-    CStringW tokenArg = quoteArg(g_bridgeTokenPath);
+    CStringW tokenArg = quoteArg(g_fyersTokenFilePath);
     CStringW cmd;
 
     if (usingPyLauncher)
@@ -996,7 +997,7 @@ static UINT BridgeWatchdogThreadProc(LPVOID)
     FILETIME lastTokenTime;
     memset(&lastTokenTime, 0, sizeof(lastTokenTime));
 
-    BridgeGetFileTime(g_bridgeTokenPath, lastTokenTime);
+    BridgeGetFileTime(g_fyersTokenFilePath, lastTokenTime);
 
     while (!g_bridgeStopping)
     {
@@ -1005,7 +1006,7 @@ static UINT BridgeWatchdogThreadProc(LPVOID)
             break;
 
         FILETIME nowTokenTime;
-        if (BridgeGetFileTime(g_bridgeTokenPath, nowTokenTime))
+        if (BridgeGetFileTime(g_fyersTokenFilePath, nowTokenTime))
         {
             BOOL changed =
                 lastTokenTime.dwLowDateTime != 0 &&
@@ -1121,7 +1122,7 @@ static int BridgeCopyData(BridgeSymbolState* state,
 
 BOOL FyersBridgeCredentialsReady()
 {
-    return !g_fyersAppId.IsEmpty() && BridgeFileExists(g_bridgeTokenPath);
+    return !g_fyersAppId.IsEmpty() && BridgeFileExists(g_fyersTokenFilePath);
 }
 
 BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
@@ -1134,13 +1135,13 @@ BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
 
     g_fyersAppId = appId;
 
-    g_bridgeTokenPath = tokenFilePath.IsEmpty()
+    g_fyersTokenFilePath = tokenFilePath.IsEmpty()
         ? BridgeDefaultTokenPath()
         : BridgeResolvePath(tokenFilePath);
 
     g_bridgeScriptPath = BridgeDefaultScriptPath();
     g_oServer = g_fyersAppId;
-    g_oApiKey = g_bridgeTokenPath;
+    g_oApiKey = g_fyersTokenFilePath;
     g_fyersAccessToken.Empty();
 
     CString cfg = BridgeModuleDir() + _T("\\FyersBridge.config");
@@ -1151,7 +1152,7 @@ BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath)
     CString line;
     line.Format(_T("AppId=%s\n"), (LPCTSTR)g_fyersAppId);
     file.WriteString(line);
-    line.Format(_T("TokenFile=%s\n"), (LPCTSTR)g_bridgeTokenPath);
+    line.Format(_T("TokenFile=%s\n"), (LPCTSTR)g_fyersTokenFilePath);
     file.WriteString(line);
     line.Format(_T("BridgeScript=%s\n"), (LPCTSTR)g_bridgeScriptPath);
     file.WriteString(line);
@@ -1286,7 +1287,7 @@ BOOL FyersDirectInit()
         g_bridgeTestEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 
     // Read branch-local config.
-    g_fyersTokenPath = BridgeDefaultTokenPath();
+    g_fyersTokenFilePath = BridgeDefaultTokenPath();
     g_bridgeScriptPath = BridgeDefaultScriptPath();
 
     CString cfg = BridgeModuleDir() + _T("\\FyersBridge.config");
@@ -1311,7 +1312,7 @@ BOOL FyersDirectInit()
                 if (key.CompareNoCase(_T("AppId")) == 0)
                     g_fyersAppId = value;
                 else if (key.CompareNoCase(_T("TokenFile")) == 0)
-                    g_fyersTokenPath = BridgeResolvePath(value);
+                    g_fyersTokenFilePath = BridgeResolvePath(value);
                 else if (key.CompareNoCase(_T("BridgeScript")) == 0)
                     g_bridgeScriptPath = BridgeResolvePath(value);
             }
