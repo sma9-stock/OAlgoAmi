@@ -114,7 +114,8 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
     if (!FyersDirectReconfigure(appId, token) ||
         !FyersTestRestConnection())
     {
-        SetDlgItemText(IDC_STATUS_STATIC, _T("FYERS REST test failed."));
+        SetDlgItemText(IDC_STATUS_STATIC,
+                       g_fyersLastError.IsEmpty() ? _T("FYERS REST test failed.") : g_fyersLastError);
         return;
     }
 
