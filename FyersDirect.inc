@@ -179,6 +179,8 @@ static volatile LONG g_bFyersForceReconnect = 0;
 static HANDLE g_hFyersConnectedEvent = NULL;
 static HANDLE g_hFyersAuthenticatedEvent = NULL;
 static CString g_fyersLastError;
+static LONG g_fyersAckCount = 0;
+static LONG g_fyersUpdateCount = 0;
 
 static CString FyersTrim(CString value)
 {
@@ -199,11 +201,14 @@ static CString FyersNormalizeAccessToken(CString token)
 	token.Trim();
 	// Accept raw JWT or APP_ID:TOKEN for convenience, but store/use only JWT.
 	int colon = token.Find(_T(':'));
-	if (colon > 0 && token.Find(_T(':'), colon + 1) < 0 &&
-		(token.Left(colon).Find(_T('-')) >= 0))
+	if (colon > 0 && token.Find(_T(':'), colon + 1) < 0)
 	{
-		token = token.Mid(colon + 1);
-		token.Trim();
+		CString left = token.Left(colon);
+		if (!g_fyersAppId.IsEmpty() && left.CompareNoCase(g_fyersAppId) == 0)
+		{
+			token = token.Mid(colon + 1);
+			token.Trim();
+		}
 	}
 	return token;
 }
@@ -1471,9 +1476,26 @@ static CString FyersSnapshotToJson(FyersSymbolState* state)
 }
 static void FyersEmitHsmSnapshot(FyersSymbolState* state){CString j=FyersSnapshotToJson(state);if(!j.IsEmpty())FyersHandleMarketMessage(j);}
 
+static void FyersSendFeedAcknowledgement(uint32_t messageNumber)
+{
+	// Current FYERS Go data SDK acknowledges every Nth feed message with
+	// a compact binary type-6 acknowledgment containing the message number.
+	std::vector<BYTE> ack(7, 0);
+	ack[2] = 6;
+	ack[3] = (BYTE)(messageNumber >> 24);
+	ack[4] = (BYTE)(messageNumber >> 16);
+	ack[5] = (BYTE)(messageNumber >> 8);
+	ack[6] = (BYTE)messageNumber;
+	uint16_t len = (uint16_t)(ack.size() - 2);
+	ack[0] = (BYTE)(len >> 8);
+	ack[1] = (BYTE)len;
+	FyersSendWebSocketBinary(ack);
+}
+
 static void FyersParseHsmDataFeed(const BYTE* data,size_t len)
 {
-	if(!data||len<9)return;BOOL ok=TRUE;size_t off=0;FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;BYTE mt=data[off++];if(mt==6){if(off+4>len)return;off+=4;}
+	if(!data||len<9)return;BOOL ok=TRUE;size_t off=0;FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;BYTE mt=data[off++];uint32_t messageNumber=0;
+	if(mt==6){if(off+4>len)return;messageNumber=FyersReadBE32(data,len,off,ok);if(!ok)return;LONG ackCount=InterlockedCompareExchange(&g_fyersAckCount,0,0);if(ackCount>0){LONG n=InterlockedIncrement(&g_fyersUpdateCount);if(n>=ackCount){InterlockedExchange(&g_fyersUpdateCount,0);FyersSendFeedAcknowledgement(messageNumber);}}}
 	uint16_t count=FyersReadBE16(data,len,off,ok);if(!ok)return;
 	for(uint16_t n=0;n<count&&off<len;n++){BYTE t=data[off++];
 		if(t==83){uint16_t topicId=FyersReadBE16(data,len,off,ok);if(!ok||off>=len)return;CStringA topicA;if(!FyersReadHsmString(data,len,off,topicA))return;CString topic(topicA);
@@ -1505,7 +1527,7 @@ static void FyersCloseWebSocketOnOwnerThread(void)
 	ws=g_hFyersWebSocket;conn=g_hFyersWsConnection;session=g_hFyersWsSession;g_hFyersWebSocket=NULL;g_hFyersWsConnection=NULL;g_hFyersWsSession=NULL;LeaveCriticalSection(&g_fyersWsCS);
 	if(ws)WinHttpWebSocketClose(ws,WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS,NULL,0);LeaveCriticalSection(&g_fyersWsIoCS);
 	if(ws)WinHttpCloseHandle(ws);if(conn)WinHttpCloseHandle(conn);if(session)WinHttpCloseHandle(session);
-	if(g_hFyersConnectedEvent)ResetEvent(g_hFyersConnectedEvent);if(g_hFyersAuthenticatedEvent)ResetEvent(g_hFyersAuthenticatedEvent);
+	if(g_hFyersConnectedEvent)ResetEvent(g_hFyersConnectedEvent);if(g_hFyersAuthenticatedEvent)ResetEvent(g_hFyersAuthenticatedEvent);InterlockedExchange(&g_fyersAckCount,0);InterlockedExchange(&g_fyersUpdateCount,0);
 }
 
 static BOOL FyersBuildAuthMessage(std::vector<BYTE>& msg,const CString& hsmKey)
@@ -1544,8 +1566,8 @@ fail:
 static void FyersProcessWebSocketControlMessage(const BYTE* data,size_t len)
 {
 	if(!data||len<3)return;BYTE type=data[2];
-	if(type==1){if(len<7)return;size_t off=4;BOOL ok=TRUE;off++;uint16_t fl=FyersReadBE16(data,len,off,ok);if(!ok||off+fl>len)return;CStringA r((LPCSTR)(data+off),(int)fl);
-		if(r=="K"){g_nStatus=STATUS_CONNECTED;if(g_hFyersAuthenticatedEvent)SetEvent(g_hFyersAuthenticatedEvent);FyersSetLastError(_T("FYERS WebSocket: HSM authentication succeeded."));FyersSubscribeAll();if(g_hAmiBrokerWnd)PostMessage(g_hAmiBrokerWnd,WM_USER_STREAMING_UPDATE,0,0);}
+	if(type==1){if(len<7)return;size_t off=4;BOOL ok=TRUE;off++;uint16_t fl=FyersReadBE16(data,len,off,ok);if(!ok||off+fl>len)return;CStringA r((LPCSTR)(data+off),(int)fl);off+=fl;
+		if(r=="K"){InterlockedExchange(&g_fyersUpdateCount,0);LONG ackCount=0;if(off+1+2+4<=len){off+=1;uint16_t ackLen=FyersReadBE16(data,len,off,ok);if(ok&&ackLen==4)ackCount=(LONG)FyersReadBE32(data,len,off,ok);}InterlockedExchange(&g_fyersAckCount,ackCount);g_nStatus=STATUS_CONNECTED;if(g_hFyersAuthenticatedEvent)SetEvent(g_hFyersAuthenticatedEvent);FyersSetLastError(_T("FYERS WebSocket: HSM authentication succeeded."));FyersSubscribeAll();if(g_hAmiBrokerWnd)PostMessage(g_hAmiBrokerWnd,WM_USER_STREAMING_UPDATE,0,0);}
 		else{CString m;m.Format(_T("FYERS WebSocket: HSM authentication rejected ('%s')."),(LPCTSTR)CString(r));FyersSetLastError(m);}return;}
 	if(type==4){BOOL ok=TRUE;size_t off=5;uint16_t fl=FyersReadBE16(data,len,off,ok);if(!ok||off+fl>len)return;CStringA r((LPCSTR)(data+off),(int)fl);if(r=="K")FyersSetLastError(_T("FYERS WebSocket: subscription accepted."));else{CString m;m.Format(_T("FYERS WebSocket: subscription rejected ('%s')."),(LPCTSTR)CString(r));FyersSetLastError(m);}return;}
 }
