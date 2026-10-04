@@ -16,10 +16,19 @@ Configure the plugin with FYERS App ID and FYERS Access Token. The token is stor
 The existing access_token.txt file is accepted only as migration convenience; native configuration is preferred.
 
 ## AmiBroker database
-Use a 5-second base interval. AmiBroker can compress 5-second data into higher intervals. Do not use Tick base interval for this build: the plugin supplies 5-second bars, not raw tick storage.
+Use a **5-second base interval**. AmiBroker can compress 5-second data into higher intraday intervals.
+
+For the requested history, set **Number of bars to load** to at least **180,000** (200,000 is a comfortable setting). The plugin keeps up to 180,000 completed 5-second bars per symbol in its in-memory cache.
+
+In **Intraday Settings**, enable **Allow mixed EOD/intraday data** if you want the same database to expose the older daily history together with the recent 5-second history.
+
+Do not use Tick as the base interval for this build: the plugin supplies native 5-second candles, not raw tick storage.
 
 ## Build
 Visual Studio 2022, Desktop development with C++, MFC, and Windows SDK. GitHub Actions builds Release|x64 and publishes the DLL artifact.
+
+## History window
+FYERS currently documents seconds-history availability as a recent **30-trading-day** window. The plugin requests a 42-calendar-day range, which is bounded by at most 30 weekdays before exchange holidays are considered, then stores the candles returned by FYERS.
 
 ## Limitation
 FYERS cannot provide historical 5-second candles that its API does not expose. The plugin repairs gaps only when FYERS REST can return the requested 5-second data.
