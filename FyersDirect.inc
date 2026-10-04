@@ -779,7 +779,7 @@ static BOOL FyersParseNumber(const CStringA& json, int& pos, double& value)
 	const char* base = json.GetString();
 	int len = json.GetLength();
 
-	while (pos < len && (base[pos] == ' ' || base[pos] == '	' ||
+	while (pos < len && (base[pos] == ' ' || base[pos] == '\t' ||
 	                     base[pos] == '\r' || base[pos] == '\n' ||
 	                     base[pos] == ','))
 	{
@@ -814,7 +814,7 @@ static BOOL FyersParseCandles(const CStringA& json, std::vector<FyersCandle>& ou
 	while (p < json.GetLength())
 	{
 		while (p < json.GetLength() &&
-		       (json[p] == ' ' || json[p] == '	' || json[p] == '\r' ||
+		       (json[p] == ' ' || json[p] == '\t' || json[p] == '\r' ||
 		        json[p] == '\n' || json[p] == ','))
 			p++;
 
@@ -838,7 +838,7 @@ static BOOL FyersParseCandles(const CStringA& json, std::vector<FyersCandle>& ou
 				break;
 			}
 			while (p < json.GetLength() &&
-			       (json[p] == ' ' || json[p] == '	' || json[p] == '\r' ||
+			       (json[p] == ' ' || json[p] == '\t' || json[p] == '\r' ||
 			        json[p] == '\n'))
 				p++;
 			if (i < 5 && p < json.GetLength() && json[p] == ',')
@@ -850,7 +850,7 @@ static BOOL FyersParseCandles(const CStringA& json, std::vector<FyersCandle>& ou
 		{
 			int q = p;
 			while (q < json.GetLength() &&
-			       (json[q] == ' ' || json[q] == '	' || json[q] == '\r' ||
+			       (json[q] == ' ' || json[q] == '\t' || json[q] == '\r' ||
 			        json[q] == '\n'))
 				q++;
 			if (q < json.GetLength() && json[q] == ',')
