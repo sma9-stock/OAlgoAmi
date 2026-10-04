@@ -737,7 +737,7 @@ static BOOL FyersHttpPostJson(const CString& path,const CStringA& body,
 
 	{
 		CStringW headers=authW;
-		headers+=L"Content-Type: application/json\r\nAccept: application/json\r\n";
+		headers+=L"Content-Type: application/json\r\nAccept: application/json\r\nversion: 3\r\n";
 		if(!WinHttpAddRequestHeaders(hRequest,(LPCWSTR)headers,(DWORD)-1L,
 			WINHTTP_ADDREQ_FLAG_ADD|WINHTTP_ADDREQ_FLAG_REPLACE))
 		{FyersSetWinHttpError(_T("WinHttpAddRequestHeaders(POST)"),GetLastError());goto cleanup;}
