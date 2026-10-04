@@ -68,7 +68,7 @@ BOOL FyersDirectNotify(struct PluginNotification* pn);
 BOOL FyersDirectGetQuotesEx(LPCTSTR pszTicker, int nPeriodicity, int nLastValid,
                             int nSize, struct Quotation* pQuotes);
 struct RecentInfo* FyersDirectGetRecentInfo(LPCTSTR pszTicker);
-BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath);
+BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath, CString bridgeScriptPath);
 BOOL FyersTestRestConnection(void);
 BOOL FyersTestWebSocket(void);
 void FyersRequestReconnect(void);
