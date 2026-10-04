@@ -27,12 +27,13 @@
 
 #define FYERS_DIRECT_HOST              _T("api-t1.fyers.in")
 #define FYERS_DIRECT_HOST_W            L"api-t1.fyers.in"
-#define FYERS_DIRECT_WS_HOST           _T("api.fyers.in")
-#define FYERS_DIRECT_WS_HOST_W         L"api.fyers.in"
-#define FYERS_DIRECT_WS_PATH           _T("/socket/v2/data/")
-#define FYERS_DIRECT_WS_PATH_W         L"/socket/v2/data/"
+#define FYERS_DIRECT_WS_HOST           _T("socket.fyers.in")
+#define FYERS_DIRECT_WS_HOST_W         L"socket.fyers.in"
+#define FYERS_DIRECT_WS_PATH           _T("/hsm/v1-5/prod")
+#define FYERS_DIRECT_WS_PATH_W         L"/hsm/v1-5/prod"
 #define FYERS_DIRECT_HISTORY_PATH      _T("/data/history")
 #define FYERS_DIRECT_QUOTES_PATH       _T("/data/quotes")
+#define FYERS_DIRECT_SYMBOL_TOKEN_PATH _T("/data/symbol-token")
 
 #define FYERS_PERIOD_5SEC              5
 #define FYERS_PERIOD_DAILY             86400
