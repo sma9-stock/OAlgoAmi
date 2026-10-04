@@ -39,8 +39,8 @@
 // FYERS exposes seconds history only for the most recent 30 trading days.
 // We deliberately ask a slightly wider calendar range for the initial load;
 // the provider will cap the result to the available seconds-history window.
-#define FYERS_5S_INITIAL_LOOKBACK_DAYS 45
-#define FYERS_5S_FALLBACK_LOOKBACK_DAYS 30
+#define FYERS_5S_INITIAL_LOOKBACK_DAYS 42
+#define FYERS_5S_FALLBACK_LOOKBACK_DAYS 42
 #define FYERS_DAILY_LOOKBACK_DAYS      730
 #define FYERS_MAX_5S_BARS              180000
 #define FYERS_MAX_DAILY_BARS           1000
@@ -1222,7 +1222,16 @@ static void FyersHandleMarketMessage(const CString& message)
 
 	EnterCriticalSection(&g_fyersStateCS);
 
+	// Detect a discontinuity in trade-time buckets before calculating the
+	// cumulative-volume delta. The missing interval will be repaired from REST.
 	BOOL gapDetectedBeforeVolume = FALSE;
+	if (state->currentBarStarted && barStart > state->currentBarStart + FYERS_PERIOD_5SEC)
+	{
+		gapDetectedBeforeVolume = TRUE;
+		gapStart = state->currentBarStart + FYERS_PERIOD_5SEC;
+		gapEnd = barStart - FYERS_PERIOD_5SEC;
+	}
+
 	// Calculate volume from the cumulative FYERS day volume whenever available.
 	// This avoids double-counting repeated SymbolUpdate frames.
 	float volumeDelta = 0.0f;
@@ -1240,21 +1249,16 @@ static void FyersHandleMarketMessage(const CString& message)
 	{
 		volumeDelta = tradeQty;
 	}
-	if (gapDetectedBeforeVolume) volumeDelta = tradeQty;
+
+	// Do not put the cumulative missing volume into the new bar; REST will
+	// supply those missing 5-second candles.
+	if (gapDetectedBeforeVolume)
+		volumeDelta = tradeQty;
 
 	BOOL duplicateTrade = FALSE;
 	if (state->lastTradeTs == tradeTs && ltp == state->currentBar.Price &&
 	    fabs((double)volumeDelta) < 0.0001)
 		duplicateTrade = TRUE;
-
-	// Detect a discontinuity in trade-time buckets. If there was a genuine
-	// missing interval, REST 5S history will be used to repair it.
-	if (state->currentBarStarted && barStart > state->currentBarStart + FYERS_PERIOD_5SEC)
-	{
-		gapDetectedBeforeVolume = TRUE;
-		gapStart = state->currentBarStart + FYERS_PERIOD_5SEC;
-		gapEnd = barStart - FYERS_PERIOD_5SEC;
-	}
 
 	if (duplicateTrade)
 		isTrade = FALSE;
@@ -1946,10 +1950,13 @@ BOOL FyersTestWebSocket(void)
 	if (!FyersCredentialsReady())
 		return FALSE;
 
+	if (g_hFyersConnectedEvent)
+		ResetEvent(g_hFyersConnectedEvent);
+
 	InterlockedExchange(&g_bFyersForceReconnect, 1);
 
 	if (g_hFyersConnectedEvent &&
-	    WaitForSingleObject(g_hFyersConnectedEvent, 3000) == WAIT_OBJECT_0)
+	    WaitForSingleObject(g_hFyersConnectedEvent, 5000) == WAIT_OBJECT_0)
 		return TRUE;
 
 	return FALSE;
