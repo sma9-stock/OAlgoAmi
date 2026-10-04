@@ -909,20 +909,31 @@ static BOOL BridgeLaunchPython()
         return FALSE;
     }
 
+    auto quoteArg = [](const CString& value) -> CStringW
+    {
+        CStringW out;
+        out.Append(L'"');
+        out += CStringW(value);
+        out.Append(L'"');
+        return out;
+    };
+
+    CStringW scriptArg = quoteArg(g_bridgeScriptPath);
+    CStringW appArg = quoteArg(g_fyersAppId);
+    CStringW tokenArg = quoteArg(g_bridgeTokenPath);
     CStringW cmd;
+
     if (usingPyLauncher)
-        cmd.Format(L"\\\"%s\\\" -3 \\\"%s\\\" --app-id \\\"%s\\\" --token-file \\\"%s\\\" --host 127.0.0.1 --port %d",
-                   pyPath,
-                   (LPCWSTR)CStringW(g_bridgeScriptPath),
-                   (LPCWSTR)CStringW(g_fyersAppId),
-                   (LPCWSTR)CStringW(g_bridgeTokenPath),
+        cmd.Format(L"-3 %s --app-id %s --token-file %s --host 127.0.0.1 --port %d",
+                   (LPCWSTR)scriptArg,
+                   (LPCWSTR)appArg,
+                   (LPCWSTR)tokenArg,
                    FYERS_BRIDGE_PORT);
     else
-        cmd.Format(L"\\\"%s\\\" \\\"%s\\\" --app-id \\\"%s\\\" --token-file \\\"%s\\\" --host 127.0.0.1 --port %d",
-                   pyPath,
-                   (LPCWSTR)CStringW(g_bridgeScriptPath),
-                   (LPCWSTR)CStringW(g_fyersAppId),
-                   (LPCWSTR)CStringW(g_bridgeTokenPath),
+        cmd.Format(L"%s --app-id %s --token-file %s --host 127.0.0.1 --port %d",
+                   (LPCWSTR)scriptArg,
+                   (LPCWSTR)appArg,
+                   (LPCWSTR)tokenArg,
                    FYERS_BRIDGE_PORT);
 
     std::vector<wchar_t> mutableCmd((size_t)cmd.GetLength() + 1);
@@ -938,7 +949,7 @@ static BOOL BridgeLaunchPython()
 
     CStringW workDir(BridgeModuleDir());
 
-    if (!CreateProcessW(NULL, mutableCmd.data(), NULL, NULL, FALSE,
+    if (!CreateProcessW(pyPath, mutableCmd.data(), NULL, NULL, FALSE,
                         CREATE_NO_WINDOW, NULL,
                         (LPCWSTR)workDir, &si, &pi))
     {
