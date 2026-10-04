@@ -929,9 +929,9 @@ static BOOL BridgeLaunchPython()
     auto quoteArg = [](const CString& value) -> CStringW
     {
         CStringW out;
-        out.Append(L'"');
+        out += L"\"";
         out += CStringW(value);
-        out.Append(L'"');
+        out += L"\"";
         return out;
     };
 
