@@ -100,6 +100,8 @@ static CString g_bridgeTestMessage;
 
 static ULONGLONG g_bridgeLastPostTick = 0;
 
+static BOOL FyersBridgeCredentialsReady();
+
 static CString BridgeModuleDir()
 {
     HMODULE h = NULL;
@@ -893,8 +895,13 @@ static BOOL BridgeLaunchPython()
 
     WCHAR pyPath[MAX_PATH] = {0};
     DWORD n = SearchPathW(NULL, L"py.exe", NULL, MAX_PATH, pyPath, NULL);
-    if (n == 0 || n >= MAX_PATH)
+    BOOL usingPyLauncher = (n > 0 && n < MAX_PATH);
+
+    if (!usingPyLauncher)
+    {
+        memset(pyPath, 0, sizeof(pyPath));
         n = SearchPathW(NULL, L"python.exe", NULL, MAX_PATH, pyPath, NULL);
+    }
 
     if (n == 0 || n >= MAX_PATH)
     {
@@ -903,12 +910,20 @@ static BOOL BridgeLaunchPython()
     }
 
     CStringW cmd;
-    cmd.Format(L""%s" -3 "%s" --app-id "%s" --token-file "%s" --host 127.0.0.1 --port %d",
-               pyPath,
-               (LPCWSTR)CStringW(g_bridgeScriptPath),
-               (LPCWSTR)CStringW(g_fyersAppId),
-               (LPCWSTR)CStringW(g_bridgeTokenPath),
-               FYERS_BRIDGE_PORT);
+    if (usingPyLauncher)
+        cmd.Format(L"\\\"%s\\\" -3 \\\"%s\\\" --app-id \\\"%s\\\" --token-file \\\"%s\\\" --host 127.0.0.1 --port %d",
+                   pyPath,
+                   (LPCWSTR)CStringW(g_bridgeScriptPath),
+                   (LPCWSTR)CStringW(g_fyersAppId),
+                   (LPCWSTR)CStringW(g_bridgeTokenPath),
+                   FYERS_BRIDGE_PORT);
+    else
+        cmd.Format(L"\\\"%s\\\" \\\"%s\\\" --app-id \\\"%s\\\" --token-file \\\"%s\\\" --host 127.0.0.1 --port %d",
+                   pyPath,
+                   (LPCWSTR)CStringW(g_bridgeScriptPath),
+                   (LPCWSTR)CStringW(g_fyersAppId),
+                   (LPCWSTR)CStringW(g_bridgeTokenPath),
+                   FYERS_BRIDGE_PORT);
 
     std::vector<wchar_t> mutableCmd((size_t)cmd.GetLength() + 1);
     wcscpy_s(mutableCmd.data(), mutableCmd.size(), cmd);
