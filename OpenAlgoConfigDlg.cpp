@@ -46,7 +46,7 @@ BOOL COpenAlgoConfigDlg::OnInitDialog()
 
     SetWindowText(_T("FYERS Direct - 5-Second Data"));
     g_oServer = g_fyersAppId;
-    g_fyersTokenFilePath = g_fyersTokenFilePath.IsEmpty() ? (BridgeDefaultTokenPath()) : g_fyersTokenFilePath;
+    if (g_fyersTokenFilePath.IsEmpty()) g_fyersTokenFilePath = _T("access_token.txt");
 
     CString status;
     status.Format(_T("FYERS App ID: %s"), (LPCTSTR)MaskCredential(g_oServer));
@@ -102,7 +102,7 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
     if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
         SetDlgItemText(IDC_STATUS_STATIC,
-                       _T("App ID and Access Token are required."));
+                       _T("App ID and access_token.txt path are required."));
         return;
     }
 
@@ -125,9 +125,9 @@ void COpenAlgoConfigDlg::OnTestWebSocketButton()
         return;
 
     CString appId = g_oServer;
-    CString token = g_oApiKey;
+    CString tokenFile = g_fyersTokenFilePath;
     appId.Trim();
-    token.Trim();
+    tokenFile.Trim();
 
     if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
