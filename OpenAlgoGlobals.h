@@ -30,6 +30,7 @@ extern int g_nStatus;
 extern BOOL g_bDirectFyersMode;
 extern CString g_fyersAppId;
 extern CString g_fyersAccessToken;
+extern CString g_fyersTokenFilePath;
 extern int g_fyersGapCheckIntervalSec;
 extern CString g_fyersLastError;
 
@@ -66,7 +67,7 @@ BOOL FyersDirectNotify(struct PluginNotification* pn);
 BOOL FyersDirectGetQuotesEx(LPCTSTR pszTicker, int nPeriodicity, int nLastValid,
                             int nSize, struct Quotation* pQuotes);
 struct RecentInfo* FyersDirectGetRecentInfo(LPCTSTR pszTicker);
-BOOL FyersDirectReconfigure(CString appId, CString accessToken);
+BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath);
 BOOL FyersTestRestConnection(void);
 BOOL FyersTestWebSocket(void);
 void FyersRequestReconnect(void);
