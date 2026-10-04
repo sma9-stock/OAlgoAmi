@@ -585,8 +585,6 @@ static void BridgeProcessLine(const CStringA& input)
     {
         BridgeStatus(_T("FYERS Python bridge connected."));
         g_nStatus = STATUS_WAIT;
-        BridgeSend(_T("PING\t1"));
-        BridgeSend(_T("HELLO\t1\t5S"));
         return;
     }
 
@@ -853,6 +851,24 @@ static UINT BridgeConnectThreadProc(LPVOID)
     }
 
     return 0;
+}
+
+static BOOL BridgeWaitForLocalBridge(DWORD timeoutMs)
+{
+    DWORD waited = 0;
+    while (waited < timeoutMs && !g_bridgeStopping)
+    {
+        EnterCriticalSection(&g_bridgeSocketCS);
+        BOOL connected = (g_bridgeSocket != INVALID_SOCKET);
+        LeaveCriticalSection(&g_bridgeSocketCS);
+
+        if (connected)
+            return TRUE;
+
+        Sleep(100);
+        waited += 100;
+    }
+    return FALSE;
 }
 
 static BOOL BridgeLaunchPython()
@@ -1181,6 +1197,11 @@ BOOL FyersTestRestConnection()
     LeaveCriticalSection(&g_bridgeTestCS);
 
     ResetEvent(g_bridgeTestEvent);
+    if (!BridgeWaitForLocalBridge(5000))
+    {
+        BridgeStatus(_T("REST test timed out waiting for the local FyersBridge.py process."));
+        return FALSE;
+    }
     BridgeSend(_T("TESTREST"));
 
     if (WaitForSingleObject(g_bridgeTestEvent, 10000) != WAIT_OBJECT_0)
@@ -1221,6 +1242,11 @@ BOOL FyersTestWebSocket()
     LeaveCriticalSection(&g_bridgeTestCS);
 
     ResetEvent(g_bridgeTestEvent);
+    if (!BridgeWaitForLocalBridge(5000))
+    {
+        BridgeStatus(_T("WebSocket test timed out waiting for the local FyersBridge.py process."));
+        return FALSE;
+    }
     BridgeSend(_T("TESTWS"));
 
     if (WaitForSingleObject(g_bridgeTestEvent, 10000) != WAIT_OBJECT_0)
