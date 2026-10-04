@@ -230,7 +230,7 @@ class FyersBridge:
         self.history_threads: list[threading.Thread] = []
 
         self.ipc_thread = threading.Thread(
-            target=self.ipc_loop,
+            target=self.ipc_server_loop,
             name="FyersBridge-IPC",
             daemon=True,
         )
@@ -261,86 +261,131 @@ class FyersBridge:
                 log.debug("IPC send failed: %s", exc)
                 return False
 
-    def connect_ipc(self) -> Optional[socket.socket]:
+    def ipc_server_loop(self) -> None:
+        """
+        Python owns the local listening endpoint.
+
+        The DLL is a reconnecting TCP client. Only loopback (127.0.0.1) is
+        used, so market data never leaves the local machine through this IPC.
+        """
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
         try:
-            sock = socket.create_connection(
-                (self.host, self.port),
-                timeout=3,
-            )
-            sock.settimeout(2)
-            return sock
-        except OSError:
-            return None
+            server.bind((self.host, self.port))
+            server.listen(1)
+            server.settimeout(1.0)
+            log.info("Local IPC server listening on %s:%d", self.host, self.port)
 
-    def ipc_loop(self) -> None:
-        while not self.stop_event.is_set():
-            sock = self.connect_ipc()
+            while not self.stop_event.is_set():
+                try:
+                    sock, address = server.accept()
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    if not self.stop_event.is_set():
+                        log.warning("IPC accept failed: %s", exc)
+                    continue
 
-            if sock is None:
-                time.sleep(IPC_RECONNECT_SEC)
-                continue
-
-            with self.ipc_lock:
-                self.ipc_socket = sock
-
-            self.ipc_connected.set()
-            log.info("Connected to OpenAlgo.dll at %s:%d", self.host, self.port)
-            self.send_line(f"READY\t{PROTOCOL_VERSION}\t5S\tofficial-python-sdk")
-
-            pending = b""
-
-            try:
-                while not self.stop_event.is_set():
-                    try:
-                        chunk = sock.recv(65536)
-                    except socket.timeout:
-                        self.send_line(f"PONG\t{int(time.time())}")
-                        continue
-
-                    if not chunk:
-                        break
-
-                    pending += chunk
-
-                    while b"\n" in pending:
-                        raw, pending = pending.split(b"\n", 1)
-                        line = raw.decode("utf-8", errors="replace").strip()
-
-                        if line:
-                            self.handle_command(line)
-            except OSError as exc:
-                log.debug("IPC receive failed: %s", exc)
-            finally:
-                self.ipc_connected.clear()
+                log.info("OpenAlgo.dll connected from %s:%d", address[0], address[1])
 
                 with self.ipc_lock:
-                    if self.ipc_socket is sock:
-                        self.ipc_socket = None
+                    old = self.ipc_socket
+                    self.ipc_socket = sock
+
+                if old is not None:
+                    try:
+                        old.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        old.close()
+                    except OSError:
+                        pass
+
+                self.ipc_connected.set()
+                self.send_line(
+                    f"READY\\t{PROTOCOL_VERSION}\\t5S\\tofficial-python-sdk"
+                )
+
+                pending = b""
 
                 try:
-                    sock.close()
-                except OSError:
-                    pass
+                    sock.settimeout(2.0)
 
-            if not self.stop_event.is_set():
-                time.sleep(IPC_RECONNECT_SEC)
+                    while not self.stop_event.is_set():
+                        try:
+                            chunk = sock.recv(65536)
+                        except socket.timeout:
+                            self.send_line(f"PONG\\t{int(time.time())}")
+                            continue
+
+                        if not chunk:
+                            break
+
+                        pending += chunk
+
+                        while b"\\n" in pending:
+                            raw, pending = pending.split(b"\\n", 1)
+                            line = raw.decode(
+                                "utf-8",
+                                errors="replace",
+                            ).strip()
+
+                            if line:
+                                self.handle_command(line)
+
+                except OSError as exc:
+                    log.debug("IPC receive failed: %s", exc)
+
+                finally:
+                    self.ipc_connected.clear()
+
+                    with self.ipc_lock:
+                        if self.ipc_socket is sock:
+                            self.ipc_socket = None
+
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+                if not self.stop_event.is_set():
+                    log.warning(
+                        "OpenAlgo.dll IPC disconnected; waiting for reconnect"
+                    )
+
+        finally:
+            try:
+                server.close()
+            except OSError:
+                pass
 
     def handle_command(self, line: str) -> None:
-        parts = line.split("\t")
+        parts = line.split("\\t")
         command = parts[0].upper()
 
         if command == "HELLO":
-            self.send_line(f"READY\t{PROTOCOL_VERSION}\t5S\tofficial-python-sdk")
+            self.send_line(
+                f"READY\\t{PROTOCOL_VERSION}\\t5S\\tofficial-python-sdk"
+            )
             return
 
         if command == "SUB" and len(parts) >= 2:
             symbol = parts[1].strip()
+
             if symbol:
                 with self.symbol_lock:
                     self.symbols.add(symbol)
 
                 self.ensure_state(symbol)
                 self.subscribe_symbols([symbol])
+
             return
 
         if command == "SYNC" and len(parts) >= 3:
@@ -350,6 +395,7 @@ class FyersBridge:
             if symbol:
                 self.ensure_state(symbol)
                 self.queue_sync(symbol, last_ts)
+
             return
 
         if command == "TESTREST":
@@ -357,18 +403,18 @@ class FyersBridge:
             return
 
         if command == "TESTWS":
-            if self.ws_connected.is_set():
+            if self.ws_connected.wait(timeout=12.0):
                 self.send_line(
-                    "TESTWS_OK\tOfficial FYERS Python DataSocket is connected."
+                    "TESTWS_OK\\tOfficial FYERS Python DataSocket is connected."
                 )
             else:
                 self.send_line(
-                    "TESTWS_ERR\tOfficial FYERS Python DataSocket is not connected yet."
+                    "TESTWS_ERR\\tOfficial FYERS Python DataSocket did not become connected within 12 seconds."
                 )
             return
 
         if command == "PING":
-            self.send_line(f"PONG\t{int(time.time())}")
+            self.send_line(f"PONG\\t{int(time.time())}")
             return
 
         if command == "SHUTDOWN":
@@ -376,7 +422,6 @@ class FyersBridge:
             self.stop_event.set()
             self.disconnect_ws()
             return
-
     # ------------------------------------------------------------------
     # FYERS authentication/client objects
     # ------------------------------------------------------------------
