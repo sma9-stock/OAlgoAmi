@@ -40,8 +40,8 @@ END
 // Version
 //
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 1, 0, 0, 2
-PRODUCTVERSION 1, 0, 0, 2
+FILEVERSION 1, 1, 0, 0
+PRODUCTVERSION 1, 1, 0, 0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -57,13 +57,13 @@ BEGIN
 BLOCK "040904b0"
 BEGIN
 VALUE "CompanyName", "OpenAlgo Community"
-VALUE "FileDescription", "OpenAlgo Data Plugin for AmiBroker"
-VALUE "FileVersion", "1.0.0.2"
+VALUE "FileDescription", "FYERS Direct Market Data Plugin for AmiBroker"
+VALUE "FileVersion", "1.1.0.0"
 VALUE "InternalName", "OpenAlgo.dll"
 VALUE "LegalCopyright", "Copyright (C) 2024 OpenAlgo Community"
 VALUE "OriginalFilename", "OpenAlgo.dll"
-VALUE "ProductName", "OpenAlgo AmiBroker Plugin"
-VALUE "ProductVersion", "1.0.0.2"
+VALUE "ProductName", "FYERS Direct AmiBroker Data Plugin"
+VALUE "ProductVersion", "1.1.0.0"
 END
 END
 BLOCK "VarFileInfo"
