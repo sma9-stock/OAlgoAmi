@@ -178,6 +178,7 @@ class WebSocketProbe:
         self.connected = threading.Event()
         self.done = threading.Event()
         self.ws = None
+        self._keep_running_started = False
 
     def on_connect(self) -> None:
         print("\nWS: authenticated/connected")
@@ -190,6 +191,13 @@ class WebSocketProbe:
         )
 
         print("WS: subscribed:", ", ".join(self.symbols))
+
+        # Match FYERS' documented Python DataSocket lifecycle: the persistent
+        # receive loop is entered from the connection callback. On an SDK
+        # reconnect, subscribe again but do not recursively enter keep_running().
+        if not self._keep_running_started:
+            self._keep_running_started = True
+            self.ws.keep_running()
 
     def on_message(self, message: Any) -> None:
         values = message if isinstance(message, list) else [message]
@@ -232,8 +240,10 @@ class WebSocketProbe:
 
         def worker() -> None:
             try:
+                # on_connect() enters keep_running(), following the official
+                # FYERS sample lifecycle. connect() remains the single socket
+                # start operation and the SDK owns reconnects for this socket.
                 self.ws.connect()
-                self.ws.keep_running()
             except BaseException as exc:
                 error_box.append(exc)
                 self.done.set()
