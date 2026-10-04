@@ -2179,7 +2179,13 @@ PLUGINAPI int Init(void){AFX_MANAGE_STATE(AfxGetStaticModuleState());return Fyer
 PLUGINAPI int Release(void){AFX_MANAGE_STATE(AfxGetStaticModuleState());FyersDirectRelease();return 1;}
 PLUGINAPI int Configure(LPCTSTR p,struct InfoSite* s){AFX_MANAGE_STATE(AfxGetStaticModuleState());UNREFERENCED_PARAMETER(p);COpenAlgoConfigDlg d;d.m_pSite=s;if(d.DoModal()==IDOK&&g_hAmiBrokerWnd)::PostMessage(g_hAmiBrokerWnd,WM_USER_STREAMING_UPDATE,0,0);return 1;}
 PLUGINAPI AmiVar GetExtraData(LPCTSTR a,LPCTSTR b,int c,int d,void*(*e)(unsigned int)){UNREFERENCED_PARAMETER(a);UNREFERENCED_PARAMETER(b);UNREFERENCED_PARAMETER(c);UNREFERENCED_PARAMETER(d);UNREFERENCED_PARAMETER(e);AmiVar v;v.type=VAR_NONE;v.val=0;return v;}
-PLUGINAPI int SetTimeBase(int n){UNREFERENCED_PARAMETER(n);return 1;}
+PLUGINAPI int SetTimeBase(int n)
+{
+    // FYERS Direct supplies native 5-second intraday bars. AmiBroker then
+    // compresses those base bars into higher intraday chart periods.
+    // EOD is also supported for databases configured with a daily base.
+    return (n == 5 || n == 86400) ? 1 : 0;
+}
 PLUGINAPI int GetSymbolLimit(void){return 5000;}
 PLUGINAPI int GetPluginStatus(struct PluginStatus* s){AFX_MANAGE_STATE(AfxGetStaticModuleState());if(!s)return 0;s->nStructSize=sizeof(*s);if(g_nStatus==STATUS_CONNECTED){s->nStatusCode=0;strcpy_s(s->szShortMessage,sizeof(s->szShortMessage),"OK");strcpy_s(s->szLongMessage,sizeof(s->szLongMessage),"FYERS Direct: Connected");s->clrStatusColor=RGB(0,255,0);}else if(g_nStatus==STATUS_WAIT){s->nStatusCode=0x10000000;strcpy_s(s->szShortMessage,sizeof(s->szShortMessage),"WAIT");strcpy_s(s->szLongMessage,sizeof(s->szLongMessage),"FYERS Direct: Waiting for market-data connection");s->clrStatusColor=RGB(255,255,0);}else if(g_nStatus==STATUS_SHUTDOWN){s->nStatusCode=0x30000000;strcpy_s(s->szShortMessage,sizeof(s->szShortMessage),"OFF");strcpy_s(s->szLongMessage,sizeof(s->szLongMessage),"FYERS Direct: Offline");s->clrStatusColor=RGB(192,0,192);}else{s->nStatusCode=0x20000000;strcpy_s(s->szShortMessage,sizeof(s->szShortMessage),"ERR");strcpy_s(s->szLongMessage,sizeof(s->szLongMessage),"FYERS Direct: Connection failed; automatic retry is active");s->clrStatusColor=RGB(255,0,0);}return 1;}
 PLUGINAPI int GetStatus(struct PluginStatus* s){return GetPluginStatus(s);}
