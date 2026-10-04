@@ -6,12 +6,12 @@ This fork changes the data path from OpenAlgo to a native FYERS REST + WebSocket
 - Base chart data: 5-second
 - Initial daily history: 2 years
 - Initial 5-second history: provider-available recent window
-- Live feed: FYERS SymbolUpdate WebSocket
+- Live feed: FYERS current HSM v1.5 data WebSocket in SymbolUpdate/full mode
 - Gap repair: REST 5-second candles after reconnects / detected time gaps
 - No order placement or trading API is used
 
 ## Credentials
-Configure the plugin with FYERS App ID and FYERS Access Token. The token is stored using Windows DPAPI under the current Windows user profile and is never embedded in source.
+Configure the plugin with the exact FYERS App ID as issued by FYERS and the Access Token JWT. Do not paste the browser redirect URL. The plugin stores only the token locally using Windows DPAPI under the current Windows user profile and never embeds credentials in source.
 
 The existing access_token.txt file is accepted only as migration convenience; native configuration is preferred.
 
@@ -28,7 +28,7 @@ Do not use Tick as the base interval for this build: the plugin supplies native 
 Visual Studio 2022, Desktop development with C++, MFC, and Windows SDK. GitHub Actions builds Release|x64 and publishes the DLL artifact.
 
 ## History window
-FYERS currently documents seconds-history availability as a recent **30-trading-day** window. The plugin requests a 42-calendar-day range, which is bounded by at most 30 weekdays before exchange holidays are considered, then stores the candles returned by FYERS.
+FYERS currently documents seconds-history availability as a recent **30-trading-day** window. The plugin requests a slightly wider 42-calendar-day range and stores only the candles that FYERS actually returns.
 
 ## Limitation
 FYERS cannot provide historical 5-second candles that its API does not expose. The plugin repairs gaps only when FYERS REST can return the requested 5-second data.
