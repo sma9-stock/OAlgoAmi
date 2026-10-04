@@ -53,6 +53,11 @@ CString BuildOpenAlgoURL(const CString& server, int port, const CString& endpoin
 BOOL WriteApiKeyDirect(const CString& key);
 BOOL ReadApiKeyDirect(CString& outKey);
 
+// Forward declarations from Plugin.h (Plugin.cpp includes this header first).
+struct PluginNotification;
+struct Quotation;
+struct RecentInfo;
+
 // FYERS direct API
 BOOL FyersDirectInit(void);
 void FyersDirectRelease(void);
