@@ -130,10 +130,35 @@ def run_history(
                     print(f"  first={candles[0]}")
                     print(f"  last ={candles[-1]}")
                 else:
-                    print("  no candles in requested 120-second window (this can be normal outside live market activity)")
+                    print("  FYERS returned s=ok but no candles in the requested window.")
+            elif response.get("s") == "no_data":
+                # FYERS supplies nextTime when the requested time window has no data.
+                # This is especially useful on weekends/holidays: use that server
+                # timestamp to probe the most recent available session.
+                hint = safe_int(response.get("nextTime"), 0)
+                if hint > 0:
+                    fallback = dict(params)
+                    fallback["range_from"] = str(max(1, hint - 120))
+                    fallback["range_to"] = str(hint)
+                    try:
+                        retry = client.history(data=fallback)
+                        retry_candles = retry.get("candles") or [] if isinstance(retry, dict) else []
+                        print(f"  current window has no data; FYERS nextTime={hint}")
+                        if isinstance(retry, dict) and retry.get("s") == "ok" and retry_candles:
+                            print(f"  fallback first={retry_candles[0]}")
+                            print(f"  fallback last ={retry_candles[-1]}")
+                        else:
+                            all_ok = False
+                            print_response("  fallback response", retry)
+                    except Exception as exc:
+                        all_ok = False
+                        print(f"  fallback EXCEPTION: {exc}")
+                else:
+                    all_ok = False
+                    print_response("  full response", response)
             else:
                 all_ok = False
-                print_response(f"  full response", response)
+                print_response("  full response", response)
 
         except Exception as exc:
             all_ok = False
