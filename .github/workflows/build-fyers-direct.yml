@@ -48,7 +48,7 @@ jobs:
       - name: Validate Python bridge syntax
         shell: powershell
         run: |
-          python -m py_compile FyersBridge.py
+          python -m py_compile FyersBridge.py FyersSmokeTest.py
           Write-Host "FyersBridge.py syntax check passed"
 
       - name: Upload DLL
@@ -59,6 +59,7 @@ jobs:
             Release/OpenAlgo.dll
             Release/OpenAlgo.pdb
             FyersBridge.py
+            FyersSmokeTest.py
             requirements-fyers-bridge.txt
             FyersBridge.config.example
             docs/FYERS_PYTHON_BRIDGE.md
