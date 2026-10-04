@@ -31,6 +31,7 @@ extern BOOL g_bDirectFyersMode;
 extern CString g_fyersAppId;
 extern CString g_fyersAccessToken;
 extern CString g_fyersTokenFilePath;
+extern CString g_fyersBridgeScriptPath;
 extern int g_fyersGapCheckIntervalSec;
 extern CString g_fyersLastError;
 
