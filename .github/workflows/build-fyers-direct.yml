@@ -2,7 +2,7 @@ name: Build FYERS AmiBroker DLL + Python bridge
 
 on:
   push:
-    branches: [ "fyers-direct-5s", "fyers-python-bridge", "master" ]
+    branches: [ "fyers-direct-5s", "fyers-python-bridge", "fix/fyers-ws-single-owner", "master" ]
   pull_request:
     branches: [ "master" ]
   workflow_dispatch:
