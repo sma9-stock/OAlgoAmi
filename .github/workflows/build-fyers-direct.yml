@@ -24,7 +24,27 @@ jobs:
           if (!(Test-Path $dll)) { throw "Build did not produce $dll" }
           $size = (Get-Item $dll).Length
           if ($size -lt 10000) { throw "DLL is unexpectedly small: $size bytes" }
-          Write-Host "Built $dll ($size bytes)"
+
+          $dumpbin = Join-Path $env:ProgramFiles "Microsoft Visual Studio/2022/Enterprise/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe"
+          if (!(Test-Path $dumpbin)) {
+            $dumpbin = (Get-Command dumpbin.exe -ErrorAction Stop).Source
+          }
+
+          $headers = & $dumpbin /headers $dll 2>&1
+          if (-not ($headers -match "8664 machine \(x64\)" -or $headers -match "PE32\+")) {
+            throw "DLL did not verify as x64."
+          }
+
+          $exports = & $dumpbin /exports $dll 2>&1
+          $required = @("GetPluginInfo","Init","Release","Configure","GetQuotes","GetQuotesEx","SetTimeBase","Notify","GetRecentInfo","GetSymbolLimit","GetStatus","GetExtraData")
+          foreach ($name in $required) {
+            if (-not ($exports -match ("\b" + [regex]::Escape($name) + "\b"))) {
+              throw "Required AmiBroker export missing: $name"
+            }
+          }
+
+          Write-Host "Built and verified x64 $dll ($size bytes)"
+          Write-Host "Required AmiBroker exports verified: $($required -join ', ')"
       - name: Upload DLL
         uses: actions/upload-artifact@v4
         with:
