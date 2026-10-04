@@ -17,6 +17,8 @@ void COpenAlgoConfigDlg::DoDataExchange(CDataExchange* pDX)
     DDV_MaxChars(pDX, g_oServer, 255);
     DDX_Text(pDX, IDC_APIKEY_EDIT, g_fyersTokenFilePath);
     DDV_MaxChars(pDX, g_fyersTokenFilePath, 1023);
+    DDX_Text(pDX, IDC_WEBSOCKET_EDIT, g_fyersBridgeScriptPath);
+    DDV_MaxChars(pDX, g_fyersBridgeScriptPath, 1023);
     DDX_Text(pDX, IDC_INTERVAL_EDIT, g_fyersGapCheckIntervalSec);
     DDV_MinMaxInt(pDX, g_fyersGapCheckIntervalSec, 1, 3600);
 }
@@ -47,6 +49,7 @@ BOOL COpenAlgoConfigDlg::OnInitDialog()
     SetWindowText(_T("FYERS Direct - 5-Second Data"));
     g_oServer = g_fyersAppId;
     if (g_fyersTokenFilePath.IsEmpty()) g_fyersTokenFilePath = _T("access_token.txt");
+    if (g_fyersBridgeScriptPath.IsEmpty()) g_fyersBridgeScriptPath = _T("FyersBridge.py");
 
     CString status;
     status.Format(_T("FYERS App ID: %s"), (LPCTSTR)MaskCredential(g_oServer));
@@ -64,8 +67,10 @@ void COpenAlgoConfigDlg::OnOK()
 
     CString appId = g_oServer;
     CString tokenFile = g_fyersTokenFilePath;
+    CString bridgeScript = g_fyersBridgeScriptPath;
     appId.Trim();
     tokenFile.Trim();
+    bridgeScript.Trim();
 
     if (appId.IsEmpty())
     {
@@ -76,7 +81,7 @@ void COpenAlgoConfigDlg::OnOK()
     if (tokenFile.IsEmpty())
         tokenFile = _T("access_token.txt");
 
-    if (!FyersDirectReconfigure(appId, tokenFile))
+    if (!FyersDirectReconfigure(appId, tokenFile, bridgeScript))
     {
         AfxMessageBox(_T("Could not save FYERS credentials."));
         return;
@@ -96,8 +101,10 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
 
     CString appId = g_oServer;
     CString tokenFile = g_fyersTokenFilePath;
+    CString bridgeScript = g_fyersBridgeScriptPath;
     appId.Trim();
     tokenFile.Trim();
+    bridgeScript.Trim();
 
     if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
@@ -108,7 +115,7 @@ void COpenAlgoConfigDlg::OnTestConnectionButton()
 
     SetDlgItemText(IDC_STATUS_STATIC, _T("Testing FYERS REST..."));
 
-    if (!FyersDirectReconfigure(appId, tokenFile) ||
+    if (!FyersDirectReconfigure(appId, tokenFile, bridgeScript) ||
         !FyersTestRestConnection())
     {
         SetDlgItemText(IDC_STATUS_STATIC,
@@ -126,20 +133,22 @@ void COpenAlgoConfigDlg::OnTestWebSocketButton()
 
     CString appId = g_oServer;
     CString tokenFile = g_fyersTokenFilePath;
+    CString bridgeScript = g_fyersBridgeScriptPath;
     appId.Trim();
     tokenFile.Trim();
+    bridgeScript.Trim();
 
     if (appId.IsEmpty() || tokenFile.IsEmpty())
     {
         SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
-                       _T("App ID and Access Token are required."));
+                       _T("App ID and token file are required."));
         return;
     }
 
     SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
                    _T("Testing FYERS WebSocket..."));
 
-    if (!FyersDirectReconfigure(appId, tokenFile) ||
+    if (!FyersDirectReconfigure(appId, tokenFile, bridgeScript) ||
         !FyersTestWebSocket())
     {
         SetDlgItemText(IDC_WEBSOCKET_STATUS_STATIC,
