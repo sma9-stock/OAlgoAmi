@@ -145,6 +145,40 @@ static CString BridgeDefaultTokenPath()
     return BridgeModuleDir() + _T("\\access_token.txt");
 }
 
+static CString BridgePathDirectory(const CString& value)
+{
+    CString p = value;
+    int slash1 = p.ReverseFind(_T('\\'));
+    int slash2 = p.ReverseFind(_T('/'));
+    int slash = max(slash1, slash2);
+
+    if (slash < 0)
+        return CString();
+
+    return p.Left(slash);
+}
+
+static CString BridgeResolveTokenPath(const CString& tokenPath,
+                                      const CString& scriptPath)
+{
+    CString token = tokenPath;
+    token.Trim();
+
+    if (token.IsEmpty())
+        return BridgeDefaultTokenPath();
+
+    if (token.GetLength() >= 2 && token[1] == _T(':'))
+        return token;
+    if (token.Left(2) == _T("\\\\"))
+        return token;
+
+    CString scriptDir = BridgePathDirectory(scriptPath);
+    if (!scriptDir.IsEmpty())
+        return scriptDir + _T("\\") + token;
+
+    return BridgeResolvePath(token);
+}
+
 static CString BridgeDefaultScriptPath()
 {
     return BridgeModuleDir() + _T("\\FyersBridge.py");
@@ -1151,13 +1185,13 @@ BOOL FyersDirectReconfigure(CString appId, CString tokenFilePath, CString bridge
 
     g_fyersAppId = appId;
 
-    g_fyersTokenFilePath = tokenFilePath.IsEmpty()
-        ? BridgeDefaultTokenPath()
-        : BridgeResolvePath(tokenFilePath);
-
     g_fyersBridgeScriptPath = bridgeScriptPath.IsEmpty()
         ? BridgeDefaultScriptPath()
         : BridgeResolvePath(bridgeScriptPath);
+
+    g_fyersTokenFilePath = tokenFilePath.IsEmpty()
+        ? BridgeResolveTokenPath(_T("access_token.txt"), g_fyersBridgeScriptPath)
+        : BridgeResolveTokenPath(tokenFilePath, g_fyersBridgeScriptPath);
     g_oServer = g_fyersAppId;
     g_oApiKey = g_fyersTokenFilePath;
     g_fyersAccessToken.Empty();
