@@ -64,6 +64,7 @@ BOOL g_bDirectFyersMode = TRUE;
 CString g_fyersAppId = _T("");
 CString g_fyersAccessToken = _T("");  // intentionally unused in Python-bridge build
 CString g_fyersTokenFilePath = _T("");
+CString g_fyersBridgeScriptPath = _T("");
 CString g_fyersLastError = _T("");
 int g_fyersGapCheckIntervalSec = 5;
 
