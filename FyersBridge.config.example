@@ -1,0 +1,4 @@
+AppId=YOUR_FYERS_APP_ID-100
+TokenFile=access_token.txt
+BridgeScript=FyersBridge.py
+# Optional: absolute path to python.exe/py.exe can be added as PythonExe=...
