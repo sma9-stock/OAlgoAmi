@@ -1357,6 +1357,7 @@ static void FyersCloseWebSocketOnOwnerThread(void)
 	HINTERNET conn = NULL;
 	HINTERNET session = NULL;
 
+	EnterCriticalSection(&g_fyersWsIoCS);
 	EnterCriticalSection(&g_fyersWsCS);
 	ws = g_hFyersWebSocket;
 	conn = g_hFyersWsConnection;
@@ -1367,12 +1368,10 @@ static void FyersCloseWebSocketOnOwnerThread(void)
 	LeaveCriticalSection(&g_fyersWsCS);
 
 	if (ws)
-	{
-		EnterCriticalSection(&g_fyersWsIoCS);
 		WinHttpWebSocketClose(ws, WINHTTP_WEB_SOCKET_SUCCESS_CLOSE_STATUS, NULL, 0);
-		LeaveCriticalSection(&g_fyersWsIoCS);
-		WinHttpCloseHandle(ws);
-	}
+	LeaveCriticalSection(&g_fyersWsIoCS);
+
+	if (ws) WinHttpCloseHandle(ws);
 	if (conn) WinHttpCloseHandle(conn);
 	if (session) WinHttpCloseHandle(session);
 }
